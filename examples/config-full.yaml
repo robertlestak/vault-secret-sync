@@ -1,0 +1,90 @@
+# The log level for the application. Can be one of "debug", "info", "warn", "error", "fatal", or "panic".
+logLevel: "info"
+
+# Configuration for the event server.
+events:
+  # Whether the event server is enabled.
+  enabled: true
+  # The port the event server listens on.
+  port: 8080
+  # Security settings for the event server.
+  security:
+    # Whether security is enabled for the event server.
+    enabled: true
+    # The token used for authentication.
+    token: "your-token"
+    # TLS configuration for the event server.
+    tls: 
+      certFile: "/path/to/certfile"
+      keyFile: "/path/to/keyfile"
+  # Whether to deduplicate events.
+  dedupe: true
+
+# Configuration for the operator.
+operator:
+  # Whether the operator is enabled.
+  enabled: true
+  workerPoolSize: 10
+  # The number of subscriptions to use.
+  numSubscriptions: 10
+
+# Configuration for the stores.
+stores:
+  aws:
+    region: "us-west-2"
+
+  github:
+    installId: 12345
+    appId: 67890
+    privateKeyPath: "/path/to/private/key"
+
+# Configuration for the queue.
+queue:
+  # The type of queue to use.
+  type: "your-queue-type"
+  # Parameters for the queue.
+  params:
+    param1: "value1"
+    param2: "value2"
+
+# Configuration for the metrics server.
+metrics:
+  # The port the metrics server listens on.
+  port: 9090
+  # Security settings for the metrics server.
+  security:
+    # Whether security is enabled for the metrics server.
+    enabled: true
+    # The token used for authentication.
+    token: "your-token"
+    # TLS configuration for the metrics server.
+    tls: 
+      certFile: "/path/to/certfile"
+      keyFile: "/path/to/keyfile"
+
+notifications:
+  email:
+    enabled: true
+    host: "smtp.example.com"
+    port: 587
+    username: "your-email@example.com"
+    password: "your-email-password"
+    from: "your-email@example.com"
+    to: "recipient@example.com"
+    subject: "Notification Subject"
+    body: "This is the notification body."
+  slack:
+    enabled: true
+    url: "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"
+    message: "This is the notification message."
+  webhook:
+    enabled: true
+    url: "https://example.com/webhook"
+    method: "POST"
+    headers:
+      Content-Type: "application/json"
+    body: |
+      {
+        "status": "{{ .Status }}",
+        "message": "{{ .Message }}"
+      }

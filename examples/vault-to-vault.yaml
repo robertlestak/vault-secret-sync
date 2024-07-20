@@ -1,0 +1,16 @@
+---
+apiVersion: vaultsecretsync.lestak.sh/v1alpha1
+kind: VaultSecretSync
+metadata:
+  name: vault-to-vault
+  namespace: default
+spec:
+  source:
+    address: "https://vault.example.com"
+    path: "hello/world/(.*)"
+    namespace: "foo/bar"
+  dest:
+  - vault:
+      address: "https://vault2.example.com"
+      path: "rewritten/path/$1"
+      namespace: "robertlestak/example"

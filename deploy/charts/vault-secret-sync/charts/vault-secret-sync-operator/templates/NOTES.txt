@@ -1,0 +1,5 @@
+The Vault Secret Sync Operator has been installed.
+
+To verify that the operator is running, run:
+
+  kubectl get pods -n {{ .Release.Namespace }} -l "app.kubernetes.io/name=vault-secret-sync-operator"
