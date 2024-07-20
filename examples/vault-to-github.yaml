@@ -1,0 +1,18 @@
+---
+apiVersion: vaultsecretsync.lestak.sh/v1alpha1
+kind: VaultSecretSync
+metadata:
+  name: vault-to-github
+  namespace: default
+spec:
+  source:
+    address: "https://vault.example.com"
+    path: "hello/world"
+    namespace: "foo/bar"
+  dest:
+  - github:
+      repo: "foobar"
+      owner: "helloworld"
+  - github:
+      repo: "barfoo"
+      owner: "helloworld"

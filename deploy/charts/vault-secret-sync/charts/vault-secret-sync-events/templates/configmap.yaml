@@ -1,0 +1,12 @@
+{{- if (eq .Values.existingConfigMap "") }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vault-secret-sync-events.configMapName" . }}
+  labels:
+    {{- include "vault-secret-sync-events.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+  {{- .Values.config | toYaml | nindent 4 }}
+{{- end }}

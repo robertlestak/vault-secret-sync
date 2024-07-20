@@ -1,0 +1,21 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "vault-secret-sync-operator.fullname" . }}
+  labels:
+    {{- include "vault-secret-sync-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["events", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["vaultsecretsync.lestak.sh"]
+    resources: ["vaultsecretsyncs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["vaultsecretsync.lestak.sh"]
+    resources: ["vaultsecretsyncs/status"]
+    verbs: ["get", "update", "patch"]
+{{- end -}}
