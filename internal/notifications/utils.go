@@ -54,6 +54,9 @@ func messagePayload(message v1alpha1.NotificationMessage, body string) string {
 		payload, err := renderTemplate(body, message)
 		if err != nil {
 			l.Warnf("failed to render custom body: %v", err)
+			// add the error message to the body so the user can see what went wrong
+			// without having to dig through the logs
+			body += fmt.Sprintf("\n\nError rendering custom body: %v", err)
 			return body
 		}
 		l.Debugf("custom body: %s", payload)
