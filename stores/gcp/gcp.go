@@ -121,7 +121,7 @@ func (g *GcpClient) GetPath() string {
 	return g.Name
 }
 
-func (g *GcpClient) GetSecret(ctx context.Context, name string) (map[string]any, error) {
+func (g *GcpClient) GetSecret(ctx context.Context, name string) ([]byte, error) {
 	l := log.WithFields(log.Fields{
 		"action": "GetSecret",
 	})
@@ -134,17 +134,10 @@ func (g *GcpClient) GetSecret(ctx context.Context, name string) (map[string]any,
 		l.Errorf("error: %v", err)
 		return nil, err
 	}
-	var secret map[string]any
-	err = json.Unmarshal(sv.Payload.Data, &secret)
-	if err != nil {
-		l.Errorf("error: %v", err)
-		return nil, err
-	}
-
-	return secret, nil
+	return sv.Payload.Data, nil
 }
 
-func (c *GcpClient) createSecretVersion(ctx context.Context, name string, secret map[string]any) error {
+func (c *GcpClient) createSecretVersion(ctx context.Context, name string, secret []byte) error {
 	l := log.WithFields(log.Fields{
 		"action":   "createSecretVersion",
 		"name":     name,
@@ -153,14 +146,10 @@ func (c *GcpClient) createSecretVersion(ctx context.Context, name string, secret
 	})
 	l.Trace("start")
 	defer l.Trace("end")
-	secretString, err := json.Marshal(secret)
-	if err != nil {
-		l.Errorf("error: %v", err)
-		return err
-	}
+	secretString := secret
 	crc32c := crc32.MakeTable(crc32.Castagnoli)
 	checksum := int64(crc32.Checksum(secretString, crc32c))
-	_, err = c.client.AddSecretVersion(ctx, &secretmanagerpb.AddSecretVersionRequest{
+	_, err := c.client.AddSecretVersion(ctx, &secretmanagerpb.AddSecretVersionRequest{
 		// parent := "projects/my-project/secrets/my-secret"
 		Parent: c.fullName(name),
 		Payload: &secretmanagerpb.SecretPayload{
@@ -233,7 +222,7 @@ func (c *GcpClient) fullName(name string) string {
 	return fmt.Sprintf("projects/%s/secrets/%s", c.Project, c.cleanName(name))
 }
 
-func (c *GcpClient) createSecret(ctx context.Context, name string, secret map[string]any) error {
+func (c *GcpClient) createSecret(ctx context.Context, name string, secret []byte) error {
 	l := log.WithFields(log.Fields{
 		"action":   "createSecret",
 		"name":     name,
@@ -299,7 +288,7 @@ func (c *GcpClient) updateSecret(ctx context.Context, name string, secret map[st
 	return nil
 }
 
-func (g *GcpClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, path string, secrets map[string]any) (map[string]any, error) {
+func (g *GcpClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, path string, secrets []byte) ([]byte, error) {
 	l := log.WithFields(log.Fields{
 		"action":   "WriteSecret",
 		"driver":   g.Driver(),

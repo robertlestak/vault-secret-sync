@@ -272,65 +272,78 @@ func (vc *VaultClient) GetKVSecretOnce(ctx context.Context, s string) (map[strin
 
 // GetKVSecret will login and retry secret access on failure
 // to gracefully handle token expiration
-func (vc *VaultClient) GetSecret(ctx context.Context, s string) (map[string]interface{}, error) {
+func (vc *VaultClient) GetSecret(ctx context.Context, s string) ([]byte, error) {
 	var sec map[string]interface{}
 	var err error
 	terr := vc.NewToken(ctx)
 	if terr != nil {
-		return sec, terr
+		return nil, terr
 	}
 	sec, err = vc.GetKVSecretOnce(ctx, s)
 	if err != nil {
 		terr := vc.NewToken(ctx)
 		if terr != nil {
-			return sec, terr
+			return nil, terr
 		}
 		sec, err = vc.GetKVSecretOnce(ctx, s)
 		if err != nil {
-			return sec, err
+			return nil, err
 		}
 	}
-	return sec, err
+	b, err := json.Marshal(sec)
+	if err != nil {
+		return nil, err
+	}
+	return b, err
 }
 
 // WriteSecret will login and retry secret write on failure
 // to gracefully handle token expiration
-func (vc *VaultClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, s string, data map[string]interface{}) (map[string]interface{}, error) {
+func (vc *VaultClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, s string, bData []byte) ([]byte, error) {
 	l := log.WithFields(log.Fields{
 		"address": vc.Address,
 		"role":    vc.Role,
 		"path":    s,
 		"method":  vc.AuthMethod,
 	})
+	var data map[string]interface{}
+	err := json.Unmarshal(bData, &data)
+	if err != nil {
+		return nil, err
+	}
 	var secrets map[string]interface{}
-	var err error
 	if vc.Merge {
 		sec, err := vc.GetSecret(ctx, s)
 		if err != nil {
-			return secrets, err
+			return nil, err
+		}
+		var secd map[string]interface{}
+		err = json.Unmarshal(sec, &secd)
+		if err != nil {
+			return nil, err
 		}
 		for k, v := range data {
-			sec[k] = v
+			secd[k] = v
 		}
-		data = sec
+		data = secd
 	}
 	terr := vc.NewToken(ctx)
 	if terr != nil {
-		return secrets, terr
+		return nil, terr
 	}
 	secrets, err = vc.WriteSecretOnce(ctx, s, data)
 	if err != nil {
 		terr := vc.NewToken(ctx)
 		if terr != nil {
-			return secrets, terr
+			return nil, terr
 		}
 		secrets, err = vc.WriteSecretOnce(ctx, s, data)
 		if err != nil {
-			return secrets, err
+			return nil, err
 		}
 	}
 	l.Tracef("secrets=%+v", secrets)
-	return secrets, err
+	return nil, err
 }
 
 // WriteSecret writes a secret to Vault VaultClient at path p with secret value s

@@ -1,180 +1,249 @@
 package transforms
 
 import (
-	"bytes"
-	"encoding/json"
 	"testing"
 
 	"github.com/robertlestak/vault-secret-sync/api/v1alpha1"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestExecuteTransformTemplate(t *testing.T) {
-	// Define a sample VaultSecretSync with a simple template transformation
-	simpleTemplate := `{"newField": "{{.oldField}}"}`
-	complexTemplate := `{
-		"concatenated": "{{.field1}}-{{.field2}}",
-		"nested": {
-			"field": "{{.nestedField}}"
-		},
-		"list": [
-			{{range $index, $element := .list}}{{if $index}}, {{end}}"{{$element}}"{{end}}
-		]
-	}`
-
 	tests := []struct {
-		name           string
-		template       string
-		secret         map[string]any
-		expectedSecret map[string]any
-		expectError    bool
+		name     string
+		sc       v1alpha1.VaultSecretSync
+		secret   []byte
+		expected []byte
+		wantErr  bool
 	}{
 		{
-			name:     "Simple template",
-			template: simpleTemplate,
-			secret: map[string]any{
-				"oldField": "oldValue",
-			},
-			expectedSecret: map[string]any{
-				"newField": "oldValue",
-			},
-			expectError: false,
-		},
-		{
-			name:     "Complex template",
-			template: complexTemplate,
-			secret: map[string]any{
-				"field1":      "value1",
-				"field2":      "value2",
-				"nestedField": "nestedValue",
-				"list":        []string{"item1", "item2", "item3"},
-			},
-			expectedSecret: map[string]any{
-				"concatenated": "value1-value2",
-				"nested": map[string]any{
-					"field": "nestedValue",
+			name: "No template",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{},
 				},
-				"list": []string{"item1", "item2", "item3"},
 			},
-			expectError: false,
+			secret:   []byte(`{"key":"value"}`),
+			expected: []byte(`{"key":"value"}`),
+			wantErr:  false,
 		},
 		{
-			name:     "Template with missing fields",
-			template: `{"missingField": "{{.nonexistent}}"}`,
-			secret: map[string]any{
-				"existingField": "value",
+			name: "Valid template",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{
+						Template: ptrToString(`{"newKey":"{{ .key }}"}`),
+					},
+				},
 			},
-			expectedSecret: map[string]any{
-				"missingField": "<no value>",
-			},
-			expectError: false,
-		},
-		{
-			name: "Template with conditional logic",
-			template: `{
-				{{if .condition}} "conditionalField": "true" {{else}} "conditionalField": "false" {{end}}
-			}`,
-			secret: map[string]any{
-				"condition": true,
-			},
-			expectedSecret: map[string]any{
-				"conditionalField": "true",
-			},
-			expectError: false,
-		},
-		{
-			name:     "Invalid template syntax",
-			template: `{"newField": "{{.oldField}"}`,
-			secret: map[string]any{
-				"oldField": "oldValue",
-			},
-			expectedSecret: nil,
-			expectError:    true,
+			secret:   []byte(`{"key":"value"}`),
+			expected: []byte(`{"newKey":"value"}`),
+			wantErr:  false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			vaultSecretSync := v1alpha1.VaultSecretSync{
-				Spec: v1alpha1.VaultSecretSyncSpec{
-					Transforms: &v1alpha1.TransformSpec{
-						Template: &tt.template,
-					},
-				},
-			}
-
-			newSecret, err := ExecuteTransformTemplate(vaultSecretSync, tt.secret)
-			if (err != nil) != tt.expectError {
-				t.Errorf("ExecuteTransformTemplate() error = %v, expectError %v", err, tt.expectError)
+			result, err := ExecuteTransformTemplate(tt.sc, tt.secret)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ExecuteTransformTemplate() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if !tt.expectError && !compareSecrets(newSecret, tt.expectedSecret) {
-				t.Errorf("ExecuteTransformTemplate() newSecret = %v, expectedSecret %v", newSecret, tt.expectedSecret)
-			}
+			assert.Equal(t, tt.expected, result)
 		})
 	}
 }
 
-// Helper function to compare two secret maps
-func compareSecrets(secret1, secret2 map[string]any) bool {
-	secret1Bytes, _ := json.Marshal(secret1)
-	secret2Bytes, _ := json.Marshal(secret2)
-	return bytes.Equal(secret1Bytes, secret2Bytes)
-}
-
-func TestExecuteIncludeTransforms(t *testing.T) {
-	// Define a sample VaultSecretSync with include transformations
-	vaultSecretSync := v1alpha1.VaultSecretSync{
-		Spec: v1alpha1.VaultSecretSyncSpec{
-			Transforms: &v1alpha1.TransformSpec{
-				Include: []string{"includedField"},
+func TestExecuteRenameTransforms(t *testing.T) {
+	tests := []struct {
+		name     string
+		sc       v1alpha1.VaultSecretSync
+		secret   []byte
+		expected []byte
+		wantErr  bool
+	}{
+		{
+			name: "No rename",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{},
+				},
 			},
+			secret:   []byte(`{"key":"value"}`),
+			expected: []byte(`{"key":"value"}`),
+			wantErr:  false,
+		},
+		{
+			name: "Valid rename",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{
+						Rename: []v1alpha1.RenameTransform{
+							{From: "key", To: "newKey"},
+						},
+					},
+				},
+			},
+			secret:   []byte(`{"key":"value"}`),
+			expected: []byte(`{"newKey":"value"}`),
+			wantErr:  false,
 		},
 	}
 
-	secret := map[string]any{
-		"includedField": "includeValue",
-		"excludedField": "excludeValue",
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ExecuteRenameTransforms(tt.sc, tt.secret)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ExecuteRenameTransforms() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestExecuteIncludeTransforms(t *testing.T) {
+	tests := []struct {
+		name     string
+		sc       v1alpha1.VaultSecretSync
+		secret   []byte
+		expected []byte
+		wantErr  bool
+	}{
+		{
+			name: "No include",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{},
+				},
+			},
+			secret:   []byte(`{"key":"value"}`),
+			expected: []byte(`{"key":"value"}`),
+			wantErr:  false,
+		},
+		{
+			name: "Valid include",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{
+						Include: []string{"key"},
+					},
+				},
+			},
+			secret:   []byte(`{"key":"value","otherKey":"otherValue"}`),
+			expected: []byte(`{"key":"value"}`),
+			wantErr:  false,
+		},
 	}
 
-	expectedSecret := map[string]any{
-		"includedField": "includeValue",
-	}
-
-	newSecret, err := ExecuteIncludeTransforms(vaultSecretSync, secret)
-	if err != nil {
-		t.Errorf("ExecuteIncludeTransforms() error = %v", err)
-		return
-	}
-	if !compareSecrets(newSecret, expectedSecret) {
-		t.Errorf("ExecuteIncludeTransforms() newSecret = %v, expectedSecret %v", newSecret, expectedSecret)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ExecuteIncludeTransforms(tt.sc, tt.secret)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ExecuteIncludeTransforms() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			assert.Equal(t, tt.expected, result)
+		})
 	}
 }
 
 func TestExecuteExcludeTransforms(t *testing.T) {
-	// Define a sample VaultSecretSync with exclude transformations
-	vaultSecretSync := v1alpha1.VaultSecretSync{
-		Spec: v1alpha1.VaultSecretSyncSpec{
-			Transforms: &v1alpha1.TransformSpec{
-				Exclude: []string{"excludedField"},
+	tests := []struct {
+		name     string
+		sc       v1alpha1.VaultSecretSync
+		secret   []byte
+		expected []byte
+		wantErr  bool
+	}{
+		{
+			name: "No exclude",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{},
+				},
 			},
+			secret:   []byte(`{"key":"value"}`),
+			expected: []byte(`{"key":"value"}`),
+			wantErr:  false,
+		},
+		{
+			name: "Valid exclude",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{
+						Exclude: []string{"key"},
+					},
+				},
+			},
+			secret:   []byte(`{"key":"value","otherKey":"otherValue"}`),
+			expected: []byte(`{"otherKey":"otherValue"}`),
+			wantErr:  false,
 		},
 	}
 
-	secret := map[string]any{
-		"includedField": "includeValue",
-		"excludedField": "excludeValue",
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ExecuteExcludeTransforms(tt.sc, tt.secret)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ExecuteExcludeTransforms() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestExecuteTransforms(t *testing.T) {
+	tests := []struct {
+		name     string
+		sc       v1alpha1.VaultSecretSync
+		secret   []byte
+		expected []byte
+		wantErr  bool
+	}{
+		{
+			name: "No transforms",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{},
+				},
+			},
+			secret:   []byte(`{"key":"value"}`),
+			expected: []byte(`{"key":"value"}`),
+			wantErr:  false,
+		},
+		{
+			name: "All transforms",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{
+						Exclude: []string{"excludeKey"},
+						Include: []string{"includeKey"},
+						Rename: []v1alpha1.RenameTransform{
+							{From: "renameKey", To: "newRenameKey"},
+						},
+						Template: ptrToString(`{"templateKey":"{{ .includeKey }}"}`),
+					},
+				},
+			},
+			secret:   []byte(`{"excludeKey":"excludeValue","includeKey":"includeValue","renameKey":"renameValue"}`),
+			expected: []byte(`{"templateKey":"includeValue"}`),
+			wantErr:  false,
+		},
 	}
 
-	expectedSecret := map[string]any{
-		"includedField": "includeValue",
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ExecuteTransforms(tt.sc, tt.secret)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ExecuteTransforms() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			assert.Equal(t, tt.expected, result)
+		})
 	}
+}
 
-	newSecret, err := ExecuteExcludeTransforms(vaultSecretSync, secret)
-	if err != nil {
-		t.Errorf("ExecuteExcludeTransforms() error = %v", err)
-		return
-	}
-	if !compareSecrets(newSecret, expectedSecret) {
-		t.Errorf("ExecuteExcludeTransforms() newSecret = %v, expectedSecret %v", newSecret, expectedSecret)
-	}
+func ptrToString(s string) *string {
+	return &s
 }

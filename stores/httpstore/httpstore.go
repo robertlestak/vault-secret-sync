@@ -121,14 +121,19 @@ func (h *HTTPClient) GetPath() string {
 }
 
 // ApplyTemplate applies the configured template to the secret data
-func (h *HTTPClient) ApplyTemplate(secrets map[string]any) (string, error) {
+func (h *HTTPClient) ApplyTemplate(secrets []byte) (string, error) {
 	if h.Template == "" {
-		// No template provided, return the secrets as JSON
-		payload, err := json.Marshal(secrets)
-		if err != nil {
-			return "", err
+		// if we can unmarshal the secrets as JSON, return the JSON string
+		var secretData map[string]any
+		if err := json.Unmarshal(secrets, &secretData); err == nil {
+			payload, err := json.Marshal(secretData)
+			if err != nil {
+				// otherwise, return the secrets as is
+				return string(secrets), nil
+			}
+			return string(payload), nil
 		}
-		return string(payload), nil
+		return string(secrets), nil
 	}
 
 	// Parse and execute the template
@@ -136,9 +141,12 @@ func (h *HTTPClient) ApplyTemplate(secrets map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
+	var secretData map[string]any
+	if err := json.Unmarshal(secrets, &secretData); err != nil {
+		return string(secrets), err
+	}
 	var tplOutput bytes.Buffer
-	err = tmpl.Execute(&tplOutput, secrets)
+	err = tmpl.Execute(&tplOutput, secretData)
 	if err != nil {
 		return "", err
 	}
@@ -147,7 +155,7 @@ func (h *HTTPClient) ApplyTemplate(secrets map[string]any) (string, error) {
 }
 
 // GetSecret retrieves a secret from the HTTP URL
-func (h *HTTPClient) GetSecret(ctx context.Context, path string) (map[string]any, error) {
+func (h *HTTPClient) GetSecret(ctx context.Context, path string) ([]byte, error) {
 	url := path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -173,16 +181,11 @@ func (h *HTTPClient) GetSecret(ctx context.Context, path string) (map[string]any
 		return nil, err
 	}
 
-	var secret map[string]any
-	if err := json.Unmarshal(body, &secret); err != nil {
-		return nil, err
-	}
-
-	return secret, nil
+	return body, nil
 }
 
 // WriteSecret writes a secret to the HTTP URL
-func (h *HTTPClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, path string, secrets map[string]any) (map[string]any, error) {
+func (h *HTTPClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, path string, secrets []byte) ([]byte, error) {
 	l := log.WithFields(log.Fields{
 		"action": "WriteSecret",
 		"path":   path,

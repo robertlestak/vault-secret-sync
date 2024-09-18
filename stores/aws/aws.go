@@ -147,7 +147,7 @@ func (g *AwsClient) GetPath() string {
 	return g.Name
 }
 
-func (g *AwsClient) GetSecret(ctx context.Context, name string) (map[string]any, error) {
+func (g *AwsClient) GetSecret(ctx context.Context, name string) ([]byte, error) {
 	l := log.WithFields(log.Fields{
 		"action": "GetSecret",
 	})
@@ -161,16 +161,10 @@ func (g *AwsClient) GetSecret(ctx context.Context, name string) (map[string]any,
 		l.Errorf("error: %v", err)
 		return nil, err
 	}
-	var secret map[string]any
-	err = json.Unmarshal([]byte(*resp.SecretString), &secret)
-	if err != nil {
-		l.Errorf("error: %v", err)
-		return nil, err
-	}
-	return secret, nil
+	return []byte(*resp.SecretString), nil
 }
 
-func (c *AwsClient) createSecret(ctx context.Context, name string, secret map[string]any) error {
+func (c *AwsClient) createSecret(ctx context.Context, name string, secret []byte) error {
 	l := log.WithFields(log.Fields{
 		"action": "createSecret",
 		"name":   name,
@@ -178,15 +172,10 @@ func (c *AwsClient) createSecret(ctx context.Context, name string, secret map[st
 	})
 	l.Trace("start")
 	defer l.Trace("end")
-	secretString, err := json.Marshal(secret)
-	if err != nil {
-		l.Errorf("error: %v", err)
-		return err
-	}
 	csi := &secretsmanager.CreateSecretInput{
 		Name:         &name,
 		Description:  aws.String("managed in HashiCorp Vault. do not edit directly."),
-		SecretString: aws.String(string(secretString)),
+		SecretString: aws.String(string(secret)),
 	}
 	if c.EncryptionKey != "" {
 		csi.KmsKeyId = aws.String(c.EncryptionKey)
@@ -204,7 +193,7 @@ func (c *AwsClient) createSecret(ctx context.Context, name string, secret map[st
 		}
 		csi.AddReplicaRegions = rep
 	}
-	_, err = c.client.CreateSecret(ctx, csi)
+	_, err := c.client.CreateSecret(ctx, csi)
 	if err != nil {
 		l.Errorf("error: %v", err)
 		return err
@@ -212,7 +201,7 @@ func (c *AwsClient) createSecret(ctx context.Context, name string, secret map[st
 	return nil
 }
 
-func (c *AwsClient) updateSecret(ctx context.Context, name string, secret map[string]any) error {
+func (c *AwsClient) updateSecret(ctx context.Context, name string, secret []byte) error {
 	l := log.WithFields(log.Fields{
 		"action": "updateSecret",
 		"name":   name,
@@ -220,20 +209,15 @@ func (c *AwsClient) updateSecret(ctx context.Context, name string, secret map[st
 	})
 	l.Trace("start")
 	defer l.Trace("end")
-	secretString, err := json.Marshal(secret)
-	if err != nil {
-		l.Errorf("error: %v", err)
-		return err
-	}
 	arn := c.accountSecretArns[name]
 	usi := &secretsmanager.UpdateSecretInput{
 		SecretId:     &arn,
-		SecretString: aws.String(string(secretString)),
+		SecretString: aws.String(string(secret)),
 	}
 	if c.EncryptionKey != "" {
 		usi.KmsKeyId = aws.String(c.EncryptionKey)
 	}
-	_, err = c.client.UpdateSecret(ctx, usi)
+	_, err := c.client.UpdateSecret(ctx, usi)
 	if err != nil {
 		l.Errorf("error: %v", err)
 		return err
@@ -241,7 +225,7 @@ func (c *AwsClient) updateSecret(ctx context.Context, name string, secret map[st
 	return nil
 }
 
-func (g *AwsClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, path string, secrets map[string]any) (map[string]any, error) {
+func (g *AwsClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, path string, secrets []byte) ([]byte, error) {
 	l := log.WithFields(log.Fields{
 		"action": "WriteSecret",
 		"driver": g.Driver(),

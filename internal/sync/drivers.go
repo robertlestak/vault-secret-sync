@@ -18,8 +18,8 @@ type SyncClient interface {
 	Validate() error
 	Driver() driver.DriverName
 	GetPath() string
-	GetSecret(context.Context, string) (map[string]any, error)
-	WriteSecret(context.Context, metav1.ObjectMeta, string, map[string]any) (map[string]any, error)
+	GetSecret(context.Context, string) ([]byte, error)
+	WriteSecret(context.Context, metav1.ObjectMeta, string, []byte) ([]byte, error)
 	DeleteSecret(context.Context, string) error
 	ListSecrets(context.Context, string) ([]string, error)
 	SetDefaults(any) error

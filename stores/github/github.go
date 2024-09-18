@@ -169,10 +169,10 @@ func (g *GitHubClient) GetPath() string {
 	}
 }
 
-func (g *GitHubClient) GetSecret(ctx context.Context, p string) (map[string]any, error) {
+func (g *GitHubClient) GetSecret(ctx context.Context, p string) ([]byte, error) {
 	return nil, errors.New("not implemented")
 }
-func (g *GitHubClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, path string, secrets map[string]any) (map[string]any, error) {
+func (g *GitHubClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, path string, bSecrets []byte) ([]byte, error) {
 	l := log.WithFields(log.Fields{
 		"action": "WriteSecret",
 		"path":   path,
@@ -183,6 +183,10 @@ func (g *GitHubClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 	if g.Merge != nil && !*g.Merge {
 		// first, clear out the existing secrets
 		g.DeleteSecret(ctx, "")
+	}
+	secrets := make(map[string]interface{})
+	if err := json.Unmarshal(bSecrets, &secrets); err != nil {
+		return nil, err
 	}
 	writeErrs := make(map[string]error)
 	// create secret(s) in repo for each key/value pair

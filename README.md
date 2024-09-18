@@ -195,7 +195,7 @@ Rename a key in the secret data. This will rename the key in the secret data bef
 
 #### Template
 
-Apply a Go template to the secret data. The template will be passed the secret object as a `map[string]any`, and the result of the template will be the new secret data, which must be able to parse back into a `map[string]any`.
+Apply a Go template to the secret data. The template will be passed the secret object as a `map[string]any`, and the result of the template will be the new secret data bytes. If writing to a backend which requires key-value pairs, the template should output a JSON object which can marshal to a `map[string]any`.
 
 ```yaml
   transforms:
@@ -203,6 +203,12 @@ Apply a Go template to the secret data. The template will be passed the secret o
       {
         "then_templates_are_processed": "{{ .renames_processed_first }}"
       }
+```
+
+```yaml
+  transforms:
+    template: |
+      {{ .simple_string_data }}
 ```
 
 ### Destination Configuration

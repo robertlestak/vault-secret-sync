@@ -3,12 +3,13 @@ package transforms
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"text/template"
 
 	"github.com/robertlestak/vault-secret-sync/api/v1alpha1"
 )
 
-func ExecuteTransformTemplate(sc v1alpha1.VaultSecretSync, secret map[string]any) (map[string]any, error) {
+func ExecuteTransformTemplate(sc v1alpha1.VaultSecretSync, secret []byte) ([]byte, error) {
 	if sc.Spec.Transforms == nil || sc.Spec.Transforms.Template == nil || *sc.Spec.Transforms.Template == "" {
 		return secret, nil
 	}
@@ -29,29 +30,33 @@ func ExecuteTransformTemplate(sc v1alpha1.VaultSecretSync, secret map[string]any
 			// Convert the value to an int
 			return v.(int)
 		},
-	}).Parse(*sc.Spec.Transforms.Template)
+	}).Parse(strings.TrimSpace(*sc.Spec.Transforms.Template))
 	if err != nil {
 		return secret, err
 	}
 	var buf bytes.Buffer
-	err = t.Execute(&buf, secret)
+	var secretData map[string]any
+	err = json.Unmarshal(secret, &secretData)
+	if err != nil {
+		return secret, nil
+	}
+	err = t.Execute(&buf, secretData)
 	if err != nil {
 		return secret, err
 	}
-	newSecret := make(map[string]any)
-	err = json.Unmarshal(buf.Bytes(), &newSecret)
-	if err != nil {
-		return secret, err
-	}
-	return newSecret, nil
+	return buf.Bytes(), nil
 }
 
-func ExecuteRenameTransforms(sc v1alpha1.VaultSecretSync, secret map[string]any) (map[string]any, error) {
+func ExecuteRenameTransforms(sc v1alpha1.VaultSecretSync, secret []byte) ([]byte, error) {
 	if sc.Spec.Transforms == nil || sc.Spec.Transforms.Rename == nil {
 		return secret, nil
 	}
 	newSecret := make(map[string]any)
-	for k, v := range secret {
+	secretData := make(map[string]any)
+	if err := json.Unmarshal(secret, &secretData); err != nil {
+		return secret, nil
+	}
+	for k, v := range secretData {
 		newKey := k
 		for _, r := range sc.Spec.Transforms.Rename {
 			if r.From == k {
@@ -60,28 +65,44 @@ func ExecuteRenameTransforms(sc v1alpha1.VaultSecretSync, secret map[string]any)
 		}
 		newSecret[newKey] = v
 	}
-	return newSecret, nil
+	jd, err := json.Marshal(newSecret)
+	if err != nil {
+		return secret, nil
+	}
+	return jd, nil
 }
 
-func ExecuteIncludeTransforms(sc v1alpha1.VaultSecretSync, secret map[string]any) (map[string]any, error) {
+func ExecuteIncludeTransforms(sc v1alpha1.VaultSecretSync, secret []byte) ([]byte, error) {
 	if sc.Spec.Transforms == nil || sc.Spec.Transforms.Include == nil {
 		return secret, nil
 	}
 	newSecret := make(map[string]any)
+	secretData := make(map[string]any)
+	if err := json.Unmarshal(secret, &secretData); err != nil {
+		return secret, nil
+	}
 	for _, i := range sc.Spec.Transforms.Include {
-		if v, ok := secret[i]; ok {
+		if v, ok := secretData[i]; ok {
 			newSecret[i] = v
 		}
 	}
-	return newSecret, nil
+	jd, err := json.Marshal(newSecret)
+	if err != nil {
+		return secret, nil
+	}
+	return jd, nil
 }
 
-func ExecuteExcludeTransforms(sc v1alpha1.VaultSecretSync, secret map[string]any) (map[string]any, error) {
+func ExecuteExcludeTransforms(sc v1alpha1.VaultSecretSync, secret []byte) ([]byte, error) {
 	if sc.Spec.Transforms == nil || sc.Spec.Transforms.Exclude == nil {
 		return secret, nil
 	}
 	newSecret := make(map[string]any)
-	for k, v := range secret {
+	secretData := make(map[string]any)
+	if err := json.Unmarshal(secret, &secretData); err != nil {
+		return secret, nil
+	}
+	for k, v := range secretData {
 		include := true
 		for _, e := range sc.Spec.Transforms.Exclude {
 			if e == k {
@@ -93,10 +114,14 @@ func ExecuteExcludeTransforms(sc v1alpha1.VaultSecretSync, secret map[string]any
 			newSecret[k] = v
 		}
 	}
-	return newSecret, nil
+	jd, err := json.Marshal(newSecret)
+	if err != nil {
+		return secret, nil
+	}
+	return jd, nil
 }
 
-func ExecuteTransforms(sc v1alpha1.VaultSecretSync, secret map[string]any) (map[string]any, error) {
+func ExecuteTransforms(sc v1alpha1.VaultSecretSync, secret []byte) ([]byte, error) {
 	if sc.Spec.Transforms == nil {
 		return secret, nil
 	}

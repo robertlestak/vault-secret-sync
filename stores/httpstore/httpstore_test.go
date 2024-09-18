@@ -1,6 +1,7 @@
 package httpstore
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -51,8 +52,12 @@ func TestApplyTemplate(t *testing.T) {
 			client := &HTTPClient{
 				Template: tt.template,
 			}
-
-			output, err := client.ApplyTemplate(tt.secrets)
+			secData, err := json.Marshal(tt.secrets)
+			if err != nil {
+				t.Errorf("ApplyTemplate() error = %v", err)
+				return
+			}
+			output, err := client.ApplyTemplate(secData)
 			if (err != nil) != tt.expectError {
 				t.Errorf("ApplyTemplate() error = %v, expectError %v", err, tt.expectError)
 				return
