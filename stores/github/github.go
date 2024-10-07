@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/GoKillers/libsodium-go/cryptobox"
 	"github.com/robertlestak/vault-secret-sync/pkg/driver"
@@ -15,6 +18,7 @@ import (
 	"github.com/google/go-github/v62/github"
 	"github.com/jferrl/go-githubauth"
 	"golang.org/x/oauth2"
+	"golang.org/x/time/rate"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -120,11 +124,78 @@ func (g *GitHubClient) CreateClient(ctx context.Context) error {
 	}
 	installationTokenSource := githubauth.NewInstallationTokenSource(int64(g.InstallId), appTokenSource)
 
-	httpClient := oauth2.NewClient(ctx, installationTokenSource)
+	// Create a rate limiter
+	limiter := rate.NewLimiter(rate.Every(time.Second), 5) // 5 requests per second
 
+	// Create a custom HTTP client with retry logic
+	maxRetry := 10
+	if os.Getenv("GITHUB_MAX_RETRY") != "" {
+		pv, err := strconv.Atoi(os.Getenv("GITHUB_MAX_RETRY"))
+		if err == nil {
+			maxRetry = pv
+		}
+	}
+	rateLimitedTransport := &rateLimitedTransport{
+		base:     http.DefaultTransport,
+		limiter:  limiter,
+		maxRetry: maxRetry,
+	}
+
+	// Create an OAuth2 client with the rate-limited transport
+	httpClient := &http.Client{
+		Transport: &oauth2.Transport{
+			Base:   rateLimitedTransport,
+			Source: installationTokenSource,
+		},
+	}
+
+	// Create the GitHub client with the rate-limited HTTP client
 	g.client = github.NewClient(httpClient)
 	l.Trace("end")
 	return nil
+}
+
+type rateLimitedTransport struct {
+	base     http.RoundTripper
+	limiter  *rate.Limiter
+	maxRetry int
+}
+
+func (t *rateLimitedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var resp *http.Response
+	var err error
+	for retry := 0; retry <= t.maxRetry; retry++ {
+		err = t.limiter.Wait(req.Context())
+		if err != nil {
+			return nil, err
+		}
+
+		resp, err = t.base.RoundTrip(req)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
+			return resp, nil
+		}
+
+		if retry == t.maxRetry {
+			return resp, nil
+		}
+
+		retryAfter := resp.Header.Get("Retry-After")
+		if retryAfter != "" {
+			if seconds, err := time.ParseDuration(retryAfter + "s"); err == nil {
+				time.Sleep(seconds)
+			}
+		} else {
+			time.Sleep(time.Duration(retry+1) * time.Second)
+		}
+
+		resp.Body.Close()
+	}
+
+	return resp, err
 }
 
 func (g *GitHubClient) RepoID(ctx context.Context) (int64, error) {
