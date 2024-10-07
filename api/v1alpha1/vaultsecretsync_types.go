@@ -97,9 +97,11 @@ type EmailNotification struct {
 }
 
 type SlackNotification struct {
-	Events []NotificationEvent `json:"events"`
-	URL    string              `yaml:"url,omitempty" json:"url,omitempty"`
-	Body   string              `yaml:"body,omitempty" json:"body,omitempty"`
+	Events       []NotificationEvent `json:"events"`
+	URL          *string             `yaml:"url,omitempty" json:"url,omitempty"`
+	URLSecret    *string             `yaml:"urlSecret,omitempty" json:"urlSecret,omitempty"`
+	URLSecretKey *string             `yaml:"urlSecretKey,omitempty" json:"urlSecretKey,omitempty"`
+	Body         string              `yaml:"body,omitempty" json:"body,omitempty"`
 }
 
 type NotificationMessage struct {

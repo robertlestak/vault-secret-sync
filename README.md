@@ -314,6 +314,8 @@ Notifications can be configured to send a message to a configured receiver when 
   - slack:
       events: ["failure"]  
       url: "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"
+      urlSecret: "default/slack-url-secret" # optional, default empty. Set to the path of the secret containing the slack webhook URL
+      urlSecretKey: "url" # optional, default "url". Set to the key of the secret containing the slack webhook URL when using urlSecret
       body: |
         The sync operation has failed.
         Details:

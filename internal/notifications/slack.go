@@ -10,9 +10,26 @@ import (
 	"github.com/robertlestak/vault-secret-sync/api/v1alpha1"
 	"github.com/robertlestak/vault-secret-sync/internal/backend"
 	"github.com/robertlestak/vault-secret-sync/internal/config"
+	"github.com/robertlestak/vault-secret-sync/pkg/kubesecret"
 )
 
 func sendSlackNotification(ctx context.Context, message v1alpha1.NotificationMessage, slack v1alpha1.SlackNotification) error {
+	if (slack.URL == nil || *slack.URL == "") && slack.URLSecret != nil && *slack.URLSecret != "" {
+		sc, err := kubesecret.GetSecret(ctx, message.VaultSecretSync.Namespace, *slack.URLSecret)
+		if err != nil {
+			return err
+		}
+		sk := "url"
+		if slack.URLSecretKey != nil && *slack.URLSecretKey != "" {
+			sk = *slack.URLSecretKey
+		}
+		if v, ok := sc[sk]; ok {
+			vs := string(v)
+			slack.URL = &vs
+		} else {
+			return fmt.Errorf("secret %s does not contain key %s", *slack.URLSecret, sk)
+		}
+	}
 	if slack.Body == "" && config.Config.Notifications.Slack.Message != "" {
 		slack.Body = config.Config.Notifications.Slack.Message
 	}
@@ -29,10 +46,10 @@ func sendSlackNotification(ctx context.Context, message v1alpha1.NotificationMes
 		)
 		return err
 	}
-	if slack.URL == "" && config.Config.Notifications.Slack.URL != "" {
-		slack.URL = config.Config.Notifications.Slack.URL
+	if (slack.URL == nil || *slack.URL == "") && config.Config.Notifications.Slack.URL != "" {
+		slack.URL = &config.Config.Notifications.Slack.URL
 	}
-	resp, err := http.Post(slack.URL, "application/json", bytes.NewBuffer(payloadBytes))
+	resp, err := http.Post(*slack.URL, "application/json", bytes.NewBuffer(payloadBytes))
 	if err != nil {
 		backend.WriteEvent(
 			ctx,
