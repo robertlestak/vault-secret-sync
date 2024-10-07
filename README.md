@@ -114,7 +114,7 @@ spec:
         Details:
         Name: {{ .VaultSecretSync.Name }}
         Source: {{ .VaultSecretSync.Spec.Source.Address }}
-        Error: {{ .Error }}
+        Error: {{ .Message }}
   - webhook:
       events: ["success", "failure"]
       url: "https://example.com/webhook"
@@ -321,7 +321,7 @@ Notifications can be configured to send a message to a configured receiver when 
         Details:
         Name: {{ .VaultSecretSync.Name }}
         Source: {{ .VaultSecretSync.Spec.Source.Address }}
-        Error: {{ .Error }}
+        Error: {{ .Message }}
   - webhook:
       events: ["success", "failure"]
       url: "https://example.com/webhook"
