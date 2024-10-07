@@ -230,6 +230,32 @@ func TestExecuteTransforms(t *testing.T) {
 			expected: []byte(`{"templateKey":"includeValue"}`),
 			wantErr:  false,
 		},
+		{
+			name: "Regex include",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{
+						Include: []string{"NEXT_PUBLIC_.*"},
+					},
+				},
+			},
+			secret:   []byte(`{"NEXT_PUBLIC_KEY":"value","NEXT_PRIVATE_KEY":"otherValue"}`),
+			expected: []byte(`{"NEXT_PUBLIC_KEY":"value"}`),
+			wantErr:  false,
+		},
+		{
+			name: "Regex exclude",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{
+						Exclude: []string{"NEXT_PRIVATE_.*"},
+					},
+				},
+			},
+			secret:   []byte(`{"NEXT_PUBLIC_KEY":"value","NEXT_PRIVATE_KEY":"otherValue"}`),
+			expected: []byte(`{"NEXT_PUBLIC_KEY":"value"}`),
+			wantErr:  false,
+		},
 	}
 
 	for _, tt := range tests {

@@ -51,8 +51,10 @@ spec:
   transforms:
     include:
     - "password"
+    - "supports_regex_too.*"
     exclude:
     - "secret"
+    - "remove_private.*"
     rename:
     - from: "old_key"
       to: "new_key"

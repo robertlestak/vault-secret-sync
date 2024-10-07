@@ -3,6 +3,7 @@ package transforms
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"text/template"
 
@@ -72,6 +73,15 @@ func ExecuteRenameTransforms(sc v1alpha1.VaultSecretSync, secret []byte) ([]byte
 	return jd, nil
 }
 
+// isRegex determines if the provided string is a regex or a literal string
+func isRegex(path string) bool {
+	if !strings.ContainsAny(path, "[](){}+*?|") {
+		return false
+	}
+	_, err := regexp.Compile(path)
+	return err == nil
+}
+
 func ExecuteIncludeTransforms(sc v1alpha1.VaultSecretSync, secret []byte) ([]byte, error) {
 	if sc.Spec.Transforms == nil || sc.Spec.Transforms.Include == nil {
 		return secret, nil
@@ -82,8 +92,23 @@ func ExecuteIncludeTransforms(sc v1alpha1.VaultSecretSync, secret []byte) ([]byt
 		return secret, nil
 	}
 	for _, i := range sc.Spec.Transforms.Include {
-		if v, ok := secretData[i]; ok {
-			newSecret[i] = v
+		// if i is a regex, check regex match
+		// if not a regex, check for key match
+		if isRegex(i) {
+			re, err := regexp.Compile(i)
+			if err != nil {
+				continue
+			}
+			for k, v := range secretData {
+				if re.MatchString(k) {
+					newSecret[k] = v
+				}
+			}
+			continue
+		} else {
+			if v, ok := secretData[i]; ok {
+				newSecret[i] = v
+			}
 		}
 	}
 	jd, err := json.Marshal(newSecret)
@@ -105,9 +130,20 @@ func ExecuteExcludeTransforms(sc v1alpha1.VaultSecretSync, secret []byte) ([]byt
 	for k, v := range secretData {
 		include := true
 		for _, e := range sc.Spec.Transforms.Exclude {
-			if e == k {
-				include = false
-				break
+			if isRegex(e) {
+				re, err := regexp.Compile(e)
+				if err != nil {
+					continue
+				}
+				if re.MatchString(k) {
+					include = false
+					break
+				}
+			} else {
+				if e == k {
+					include = false
+					break
+				}
 			}
 		}
 		if include {
