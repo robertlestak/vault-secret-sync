@@ -140,13 +140,14 @@ func emailWorker(ctx context.Context, jobs chan emailJob, res chan emailJob) {
 
 func handleEmail(ctx context.Context, message v1alpha1.NotificationMessage) error {
 	jobsToDo := []emailJob{}
+NotifLoop:
 	for _, email := range message.VaultSecretSync.Spec.Notifications {
 		if email.Email == nil {
-			continue
+			continue NotifLoop
 		}
 		for _, o := range email.Email.Events {
 			if o != message.Event {
-				continue
+				continue NotifLoop
 			}
 		}
 		jobsToDo = append(jobsToDo, emailJob{

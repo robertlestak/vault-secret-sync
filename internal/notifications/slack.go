@@ -102,13 +102,14 @@ func slackWorker(ctx context.Context, jobs chan slackJob, res chan slackJob) {
 
 func handleSlack(ctx context.Context, message v1alpha1.NotificationMessage) error {
 	jobsToDo := []slackJob{}
+NotifLoop:
 	for _, slack := range message.VaultSecretSync.Spec.Notifications {
 		if slack.Slack == nil {
-			continue
+			continue NotifLoop
 		}
 		for _, o := range slack.Slack.Events {
 			if o != message.Event {
-				continue
+				continue NotifLoop
 			}
 		}
 		jobsToDo = append(jobsToDo, slackJob{

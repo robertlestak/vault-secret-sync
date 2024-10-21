@@ -112,13 +112,14 @@ func webhookWorker(ctx context.Context, jobs chan webhookJob, res chan webhookJo
 
 func handleWebhooks(ctx context.Context, message v1alpha1.NotificationMessage) error {
 	jobsToDo := []webhookJob{}
+NotifLoop:
 	for _, webhook := range message.VaultSecretSync.Spec.Notifications {
 		if webhook.Webhook == nil {
-			continue
+			continue NotifLoop
 		}
 		for _, o := range webhook.Email.Events {
 			if o != message.Event {
-				continue
+				continue NotifLoop
 			}
 		}
 		if webhook.Webhook != nil {
