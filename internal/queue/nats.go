@@ -29,7 +29,7 @@ type NATSQueue struct {
 func NewNATSQueue() *NATSQueue {
 	return &NATSQueue{
 		seenEvents: make(map[string]time.Time),
-		eventCh:    make(chan event.VaultEvent, 100), // Adjust buffer size as needed
+		eventCh:    make(chan event.VaultEvent, 1000), // Adjust buffer size as needed
 	}
 }
 
