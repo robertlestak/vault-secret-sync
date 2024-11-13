@@ -27,6 +27,9 @@ func setLogLevelStr(level string) {
 		ll = log.InfoLevel
 	}
 	log.SetLevel(ll)
+	if os.Getenv("LOG_FORMAT") == "json" {
+		log.SetFormatter(&log.JSONFormatter{})
+	}
 }
 
 func init() {
