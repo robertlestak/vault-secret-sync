@@ -35,6 +35,9 @@ func Sync(ctx context.Context, evt event.VaultEvent) error {
 	if evt.Address != "" {
 		l = l.WithFields(log.Fields{"address": evt.Address})
 	}
+	if evt.Namespace != "" {
+		l = l.WithFields(log.Fields{"namespace": evt.Namespace})
+	}
 	metrics.EventsProcessed.Inc()
 
 	startTime := time.Now()
