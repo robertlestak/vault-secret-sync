@@ -83,8 +83,14 @@ type MetricsServer struct {
 	Security *ServerSecurity `json:"security" yaml:"security"`
 }
 
+type LogConfig struct {
+	Level  string `json:"level" yaml:"level"`
+	Format string `json:"format" yaml:"format"`
+	Events bool   `json:"events" yaml:"events"`
+}
+
 type ConfigFile struct {
-	LogLevel      string                `json:"logLevel" yaml:"logLevel"`
+	Log           *LogConfig            `json:"log" yaml:"log"`
 	Events        *EventServer          `json:"events" yaml:"events"`
 	Operator      *OperatorConfig       `json:"operator" yaml:"operator"`
 	Stores        *v1alpha1.StoreConfig `json:"stores" yaml:"stores"`
@@ -168,8 +174,14 @@ func (c *ConfigFile) SetDefaults() error {
 	})
 	l.Trace("start")
 	defer l.Trace("end")
-	if c.LogLevel == "" {
-		c.LogLevel = "info"
+	if c.Log == nil {
+		c.Log = &LogConfig{}
+	}
+	if c.Log.Level == "" {
+		c.Log.Level = "info"
+	}
+	if c.Log.Format == "" {
+		c.Log.Format = "text"
 	}
 	if c.Operator == nil || c.Operator.Backend == nil {
 		c.Operator = &OperatorConfig{

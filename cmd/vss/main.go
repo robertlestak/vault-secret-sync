@@ -21,19 +21,19 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func setLogLevelStr(level string) {
+func setLogLevelStr(level string, format string) {
 	ll, err := log.ParseLevel(level)
 	if err != nil {
 		ll = log.InfoLevel
 	}
 	log.SetLevel(ll)
-	if os.Getenv("LOG_FORMAT") == "json" {
+	if format == "json" {
 		log.SetFormatter(&log.JSONFormatter{})
 	}
 }
 
 func init() {
-	setLogLevelStr(os.Getenv("LOG_LEVEL"))
+	setLogLevelStr(os.Getenv("LOG_LEVEL"), os.Getenv("LOG_FORMAT"))
 	// set the log format
 	//log.SetFormatter(&log.JSONFormatter{})
 	backend.ManualTrigger = sync.ManualTrigger
@@ -99,8 +99,8 @@ func main() {
 	if err := config.LoadFile(*configFile); err != nil {
 		l.Fatal(err)
 	}
-	if config.Config.LogLevel != "" {
-		setLogLevelStr(config.Config.LogLevel)
+	if config.Config.Log.Level != "" {
+		setLogLevelStr(config.Config.Log.Level, config.Config.Log.Format)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel() // Make sure all resources are cleaned up

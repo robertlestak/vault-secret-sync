@@ -86,7 +86,6 @@ func shouldFilterVaultEvent(event event.AuditEvent) bool {
 // and if so, will sync the secret from source to destination
 func processVaultEvent(ctx context.Context, event event.AuditEvent) error {
 	l := log.WithFields(log.Fields{
-		"event":  event,
 		"action": "processVaultEvent",
 	})
 	l.Trace("start")
@@ -94,13 +93,19 @@ func processVaultEvent(ctx context.Context, event event.AuditEvent) error {
 		l.Trace("filtering event")
 		return nil
 	}
-	l.WithFields(log.Fields{
+	l = l.WithFields(log.Fields{
 		"tenant":  event.VaultTenant,
 		"eventId": event.Event.Request.ID,
 		"op":      event.Event.Request.Operation,
 		"path":    event.Event.Request.Path,
-		"data":    event.Event.Request.Data,
+	})
+	l.WithFields(log.Fields{
+		"data":  event.Event.Request.Data,
+		"event": event.Event,
 	}).Trace("handle event")
+	if config.Config.Log.Events {
+		l.Infof("event: %s", event.Event.Request.Operation)
+	}
 	evt := sync.NewVaultEventFromAuditEvent(event)
 	err := sync.ScheduleSync(ctx, evt)
 	if err != nil {

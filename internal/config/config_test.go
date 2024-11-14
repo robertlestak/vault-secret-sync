@@ -19,7 +19,8 @@ func TestLoadFile(t *testing.T) {
 		{
 			name: "ValidYAMLConfig",
 			fileContent: `
-logLevel: debug
+log:
+  level: "debug"
 events:
   enabled: true
   port: 8080
@@ -42,7 +43,9 @@ metrics:
 			name: "ValidJSONConfig",
 			fileContent: `
 {
-  "logLevel": "debug",
+  "log": {
+    "level": "debug"
+},
   "events": {
     "enabled": true,
     "port": 8080
@@ -100,7 +103,7 @@ metrics:
 }
 
 func TestSetFromEnv(t *testing.T) {
-	t.Setenv("VSS_LOGLEVEL", "debug")
+	t.Setenv("VSS_LOG_LEVEL", "debug")
 	t.Setenv("VSS_EVENTS_ENABLED", "true")
 	t.Setenv("VSS_EVENTS_PORT", "8080")
 	t.Setenv("VSS_OPERATOR_ENABLED", "true")
@@ -112,7 +115,7 @@ func TestSetFromEnv(t *testing.T) {
 	var cfg ConfigFile
 	err := cfg.SetFromEnv()
 	assert.NoError(t, err)
-	assert.Equal(t, "debug", cfg.LogLevel)
+	assert.Equal(t, "debug", cfg.Log.Level)
 	assert.NotNil(t, cfg.Events)
 	assert.True(t, *cfg.Events.Enabled)
 	assert.Equal(t, 8080, cfg.Events.Port)
@@ -133,7 +136,7 @@ func TestSetDefaults(t *testing.T) {
 
 	err := cfg.SetDefaults()
 	assert.NoError(t, err)
-	assert.Equal(t, "info", cfg.LogLevel)
+	assert.Equal(t, "info", cfg.Log.Level)
 	assert.NotNil(t, cfg.Queue)
 	assert.Equal(t, queue.QueueType("memory"), cfg.Queue.Type)
 	assert.NotNil(t, cfg.Operator.Backend)

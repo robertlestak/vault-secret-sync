@@ -5,7 +5,10 @@ configMapName: vault-secret-sync-config
 
 config: {}
 # # The log level for the application. Can be one of "debug", "info", "warn", "error", "fatal", or "panic".
-# logLevel: "info"
+# log:
+#   level: "debug" # The log level for the application. Can be one of "debug", "info", "warn", "error", "fatal", or "panic".
+#   format: "json" # The format of the log output. Can be one of "json" or "text"
+#   events: true # Whether to log events.
 
 # # Configuration for the event server.
 # events:
