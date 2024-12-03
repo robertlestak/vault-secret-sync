@@ -5,7 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"os"
 	gosync "sync"
 	"time"
@@ -21,15 +21,14 @@ type NATSQueue struct {
 	TLS         *TLSConfig `json:"tls" yaml:"tls"`
 	seenEvents  map[string]time.Time
 	eventsMutex gosync.Mutex
-
-	nc      *nats.Conn
-	eventCh chan event.VaultEvent
+	nc          *nats.Conn
+	eventQueue  *UnboundedChannel
 }
 
 func NewNATSQueue() *NATSQueue {
 	return &NATSQueue{
 		seenEvents: make(map[string]time.Time),
-		eventCh:    make(chan event.VaultEvent, 1000), // Adjust buffer size as needed
+		eventQueue: NewUnboundedChannel(),
 	}
 }
 
@@ -77,7 +76,6 @@ func (q *NATSQueue) Start(params map[string]any) error {
 
 func (q *NATSQueue) Stop() error {
 	q.nc.Close()
-	close(q.eventCh)
 	return nil
 }
 
@@ -86,46 +84,59 @@ func (q *NATSQueue) Publish(ctx context.Context, e event.VaultEvent) error {
 	if err != nil {
 		return err
 	}
-
 	return q.nc.Publish(q.Subject, body)
 }
 
 func (q *NATSQueue) Subscribe(ctx context.Context) (chan event.VaultEvent, error) {
+	l := log.WithFields(log.Fields{
+		"action": "Subscribe",
+		"driver": "nats",
+	})
+	l.Trace("start")
+
 	out := make(chan event.VaultEvent)
 
+	// Subscribe to NATS and send events to the unbounded queue
 	_, err := q.nc.Subscribe(q.Subject, func(m *nats.Msg) {
 		var e event.VaultEvent
 		if err := json.Unmarshal(m.Data, &e); err != nil {
+			l.Errorf("error unmarshalling event: %v", err)
 			return
 		}
-
-		select {
-		case q.eventCh <- e:
-		default:
-			log.Warn("Event channel is full, dropping event")
-		}
+		q.eventQueue.Send(e)
 	})
 
+	if err != nil {
+		return nil, fmt.Errorf("failed to subscribe to NATS: %v", err)
+	}
+
+	// Start the event distributor
 	go func() {
-		for evt := range q.eventCh {
+		defer close(out)
+		for {
+			evt, err := q.eventQueue.Receive(ctx)
+			if err != nil {
+				if err == context.Canceled {
+					return
+				}
+				l.Errorf("error receiving from queue: %v", err)
+				continue
+			}
+
 			select {
-			case out <- evt:
+			case out <- evt.(event.VaultEvent):
 			case <-ctx.Done():
 				return
 			}
 		}
 	}()
 
-	return out, err
+	return out, nil
 }
 
 func (q *NATSQueue) Push(evt event.VaultEvent) error {
-	select {
-	case q.eventCh <- evt:
-		return nil
-	default:
-		return errors.New("failed to push event to local channel")
-	}
+	q.eventQueue.Send(evt)
+	return nil
 }
 
 func (q *NATSQueue) eventClearer() {
@@ -179,14 +190,12 @@ func (q *NATSQueue) EventSeen(id string) bool {
 }
 
 func (q *NATSQueue) Ping() error {
-	// Assuming q.conn is your NATS connection object
 	err := q.nc.Flush()
 	if err != nil {
-		return err // If err is not nil, there was a problem reaching the NATS server
+		return err
 	}
-	// Optionally, check for last error reported by the connection.
 	if lastErr := q.nc.LastError(); lastErr != nil {
 		return lastErr
 	}
-	return nil // If no error, the NATS server is reachable
+	return nil
 }

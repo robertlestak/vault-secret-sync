@@ -32,14 +32,14 @@ type RedisQueue struct {
 	seenEvents  map[string]time.Time
 	eventsMutex gosync.Mutex
 
-	client  *redis.Client
-	eventCh chan event.VaultEvent
+	client     *redis.Client
+	eventQueue *UnboundedChannel
 }
 
 func NewRedisQueue() *RedisQueue {
 	return &RedisQueue{
 		seenEvents: make(map[string]time.Time),
-		eventCh:    make(chan event.VaultEvent, 1000), // Adjust buffer size as needed
+		eventQueue: NewUnboundedChannel(),
 	}
 }
 
@@ -54,8 +54,8 @@ func (q *RedisQueue) Start(params map[string]any) error {
 	}
 	opts := &redis.Options{
 		Addr:        fmt.Sprintf("%s:%d", q.Host, q.Port),
-		Password:    q.Password, // no password set
-		DB:          q.Database, // use default DB
+		Password:    q.Password,
+		DB:          q.Database,
 		DialTimeout: 30 * time.Second,
 		ReadTimeout: 30 * time.Second,
 	}
@@ -93,7 +93,6 @@ func (q *RedisQueue) Stop() error {
 	if err != nil {
 		return err
 	}
-	close(q.eventCh)
 	return nil
 }
 
@@ -125,30 +124,47 @@ func (q *RedisQueue) Subscribe(ctx context.Context) (chan event.VaultEvent, erro
 	l.Trace("start")
 	ch := make(chan event.VaultEvent)
 
+	// Redis consumer goroutine
 	go func() {
 		for {
-			cmd := q.client.BLPop(0, "queue")
-			if cmd.Err() != nil {
-				break
-			}
-			var item event.VaultEvent
-			err := json.Unmarshal([]byte(cmd.Val()[1]), &item)
-			if err != nil {
-				l.Errorf("error unmarshalling event: %v", err)
-				break
-			}
 			select {
-			case q.eventCh <- item:
+			case <-ctx.Done():
+				return
 			default:
-				log.Warn("Event channel is full, dropping event")
+				cmd := q.client.BLPop(0, "queue")
+				if cmd.Err() != nil {
+					l.Errorf("error in BLPOP: %v", cmd.Err())
+					time.Sleep(time.Second) // Back off on error
+					continue
+				}
+
+				var item event.VaultEvent
+				err := json.Unmarshal([]byte(cmd.Val()[1]), &item)
+				if err != nil {
+					l.Errorf("error unmarshalling event: %v", err)
+					continue
+				}
+
+				q.eventQueue.Send(item)
 			}
 		}
 	}()
 
+	// Event distributor goroutine
 	go func() {
-		for evt := range q.eventCh {
+		defer close(ch)
+		for {
+			evt, err := q.eventQueue.Receive(ctx)
+			if err != nil {
+				if err == context.Canceled {
+					return
+				}
+				l.Errorf("error receiving from queue: %v", err)
+				continue
+			}
+
 			select {
-			case ch <- evt:
+			case ch <- evt.(event.VaultEvent):
 			case <-ctx.Done():
 				return
 			}
@@ -159,12 +175,8 @@ func (q *RedisQueue) Subscribe(ctx context.Context) (chan event.VaultEvent, erro
 }
 
 func (q *RedisQueue) Push(evt event.VaultEvent) error {
-	select {
-	case q.eventCh <- evt:
-		return nil
-	default:
-		return fmt.Errorf("failed to push event to local channel")
-	}
+	q.eventQueue.Send(evt)
+	return nil
 }
 
 func (q *RedisQueue) eventClearer() {

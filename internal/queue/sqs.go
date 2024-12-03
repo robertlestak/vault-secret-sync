@@ -3,7 +3,6 @@ package queue
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	gosync "sync"
 	"time"
 
@@ -28,13 +27,13 @@ type SQSQueue struct {
 	seenEvents  map[string]time.Time
 	eventsMutex gosync.Mutex
 
-	eventCh chan event.VaultEvent
+	eventQueue *UnboundedChannel
 }
 
 func NewSQSQueue() *SQSQueue {
 	return &SQSQueue{
 		seenEvents: make(map[string]time.Time),
-		eventCh:    make(chan event.VaultEvent, 1000), // Adjust buffer size as needed
+		eventQueue: NewUnboundedChannel(),
 	}
 }
 
@@ -66,7 +65,6 @@ func (q *SQSQueue) Start(params map[string]any) error {
 }
 
 func (q *SQSQueue) Stop() error {
-	close(q.eventCh)
 	return nil
 }
 
@@ -100,41 +98,65 @@ func (q *SQSQueue) Subscribe(ctx context.Context) (chan event.VaultEvent, error)
 	defer l.Trace("end")
 	out := make(chan event.VaultEvent)
 
+	// SQS consumer goroutine
 	go func() {
 		for {
-			result, err := q.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
-				QueueUrl:            &q.Url,
-				MaxNumberOfMessages: 1,
-				VisibilityTimeout:   20,
-				WaitTimeSeconds:     0,
-			})
-
-			if err != nil {
-				continue
-			}
-
-			if len(result.Messages) == 0 {
-				continue
-			}
-
-			var e event.VaultEvent
-			if err := json.Unmarshal([]byte(*result.Messages[0].Body), &e); err != nil {
-				l.Debugf("error: %v", err)
-				continue
-			}
-
 			select {
-			case q.eventCh <- e:
+			case <-ctx.Done():
+				return
 			default:
-				log.Warn("Event channel is full, dropping event")
+				result, err := q.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+					QueueUrl:            &q.Url,
+					MaxNumberOfMessages: 1,
+					VisibilityTimeout:   20,
+					WaitTimeSeconds:     0,
+				})
+
+				if err != nil {
+					l.Errorf("error receiving message: %v", err)
+					time.Sleep(time.Second) // Back off on error
+					continue
+				}
+
+				if len(result.Messages) == 0 {
+					continue
+				}
+
+				var e event.VaultEvent
+				if err := json.Unmarshal([]byte(*result.Messages[0].Body), &e); err != nil {
+					l.Errorf("error unmarshalling event: %v", err)
+					continue
+				}
+
+				q.eventQueue.Send(e)
+
+				// Delete the message after processing
+				_, err = q.client.DeleteMessage(ctx, &sqs.DeleteMessageInput{
+					QueueUrl:      &q.Url,
+					ReceiptHandle: result.Messages[0].ReceiptHandle,
+				})
+				if err != nil {
+					l.Errorf("error deleting message: %v", err)
+				}
 			}
 		}
 	}()
 
+	// Event distributor goroutine
 	go func() {
-		for evt := range q.eventCh {
+		defer close(out)
+		for {
+			evt, err := q.eventQueue.Receive(ctx)
+			if err != nil {
+				if err == context.Canceled {
+					return
+				}
+				l.Errorf("error receiving from queue: %v", err)
+				continue
+			}
+
 			select {
-			case out <- evt:
+			case out <- evt.(event.VaultEvent):
 			case <-ctx.Done():
 				return
 			}
@@ -145,12 +167,8 @@ func (q *SQSQueue) Subscribe(ctx context.Context) (chan event.VaultEvent, error)
 }
 
 func (q *SQSQueue) Push(evt event.VaultEvent) error {
-	select {
-	case q.eventCh <- evt:
-		return nil
-	default:
-		return fmt.Errorf("failed to push event to local channel")
-	}
+	q.eventQueue.Send(evt)
+	return nil
 }
 
 func (q *SQSQueue) eventClearer() {
