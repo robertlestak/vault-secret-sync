@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"strconv"
@@ -99,6 +100,113 @@ func NewClient(cfg *GitHubClient) (*GitHubClient, error) {
 	return vc, nil
 }
 
+type rateLimitedTransport struct {
+	base     http.RoundTripper
+	limiter  *rate.Limiter
+	maxRetry int
+}
+
+func (t *rateLimitedTransport) calculateRetryDelay(resp *http.Response, retry int) time.Duration {
+	// First check Retry-After header
+	if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+		if seconds, err := strconv.Atoi(retryAfter); err == nil {
+			return time.Duration(seconds) * time.Second
+		}
+	}
+
+	// Check X-RateLimit-Reset header which contains Unix timestamp
+	if resetStr := resp.Header.Get("X-RateLimit-Reset"); resetStr != "" {
+		if resetTime, err := strconv.ParseInt(resetStr, 10, 64); err == nil {
+			delay := time.Until(time.Unix(resetTime, 0))
+			if delay > 0 {
+				return delay
+			}
+		}
+	}
+
+	// Fallback to exponential backoff
+	baseDelay := time.Second
+	maxDelay := time.Second * 60
+
+	// Calculate exponential delay: baseDelay * 2^retry
+	delay := baseDelay * time.Duration(1<<uint(retry))
+
+	// Add jitter: random value between 0-30% of the delay
+	jitter := time.Duration(rand.Float64() * float64(delay) * 0.3)
+	delay += jitter
+
+	// Ensure we don't exceed maxDelay
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+
+	return delay
+}
+
+func (t *rateLimitedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var resp *http.Response
+	var err error
+
+	for retry := 0; retry <= t.maxRetry; retry++ {
+		// Wait for rate limiter
+		err = t.limiter.Wait(req.Context())
+		if err != nil {
+			return nil, fmt.Errorf("rate limiter wait: %w", err)
+		}
+
+		resp, err = t.base.RoundTrip(req)
+		if err != nil {
+			return nil, fmt.Errorf("round trip: %w", err)
+		}
+
+		// Success case - return immediately
+		if resp.StatusCode != http.StatusForbidden &&
+			resp.StatusCode != http.StatusTooManyRequests {
+			return resp, nil
+		}
+
+		// Last retry attempt - return the error response
+		if retry == t.maxRetry {
+			return resp, nil
+		}
+
+		delay := t.calculateRetryDelay(resp, retry)
+
+		// Log retry attempt
+		log.WithFields(log.Fields{
+			"status_code": resp.StatusCode,
+			"retry":       retry,
+			"delay":       delay.String(),
+		}).Debug("GitHub API rate limit hit, retrying request")
+
+		select {
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		case <-time.After(delay):
+		}
+
+		resp.Body.Close()
+	}
+
+	return resp, err
+}
+
+func (t *rateLimitedTransport) calculateBackoff(retry int, baseDelay, maxDelay time.Duration) time.Duration {
+	// Calculate exponential delay: baseDelay * 2^retry
+	delay := baseDelay * time.Duration(1<<uint(retry))
+
+	// Add jitter: random value between 0-30% of the delay
+	jitter := time.Duration(rand.Float64() * float64(delay) * 0.3)
+	delay += jitter
+
+	// Ensure we don't exceed maxDelay
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+
+	return delay
+}
+
 func (g *GitHubClient) CreateClient(ctx context.Context) error {
 	l := log.WithFields(log.Fields{
 		"action": "CreateClient",
@@ -107,6 +215,7 @@ func (g *GitHubClient) CreateClient(ctx context.Context) error {
 	if g.PrivateKeyString == "" && g.PrivateKeyPath == "" {
 		return errors.New("privateKey or privateKeyPath is required")
 	}
+
 	var privateKey []byte
 	if g.PrivateKeyString != "" {
 		privateKey = []byte(g.PrivateKeyString)
@@ -117,6 +226,7 @@ func (g *GitHubClient) CreateClient(ctx context.Context) error {
 			return err
 		}
 	}
+
 	appTokenSource, err := githubauth.NewApplicationTokenSource(int64(g.AppId), privateKey)
 	if err != nil {
 		l.Error(err)
@@ -124,24 +234,23 @@ func (g *GitHubClient) CreateClient(ctx context.Context) error {
 	}
 	installationTokenSource := githubauth.NewInstallationTokenSource(int64(g.InstallId), appTokenSource)
 
-	// Create a rate limiter
-	limiter := rate.NewLimiter(rate.Every(time.Second), 5) // 5 requests per second
+	// Create a rate limiter - reduced to 2 requests per second to be more conservative
+	limiter := rate.NewLimiter(rate.Every(time.Second/2), 1)
 
-	// Create a custom HTTP client with retry logic
+	// Get max retry from env or use default
 	maxRetry := 10
-	if os.Getenv("GITHUB_MAX_RETRY") != "" {
-		pv, err := strconv.Atoi(os.Getenv("GITHUB_MAX_RETRY"))
-		if err == nil {
+	if val := os.Getenv("GITHUB_MAX_RETRY"); val != "" {
+		if pv, err := strconv.Atoi(val); err == nil {
 			maxRetry = pv
 		}
 	}
+
 	rateLimitedTransport := &rateLimitedTransport{
 		base:     http.DefaultTransport,
 		limiter:  limiter,
 		maxRetry: maxRetry,
 	}
 
-	// Create an OAuth2 client with the rate-limited transport
 	httpClient := &http.Client{
 		Transport: &oauth2.Transport{
 			Base:   rateLimitedTransport,
@@ -149,53 +258,9 @@ func (g *GitHubClient) CreateClient(ctx context.Context) error {
 		},
 	}
 
-	// Create the GitHub client with the rate-limited HTTP client
 	g.client = github.NewClient(httpClient)
 	l.Trace("end")
 	return nil
-}
-
-type rateLimitedTransport struct {
-	base     http.RoundTripper
-	limiter  *rate.Limiter
-	maxRetry int
-}
-
-func (t *rateLimitedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	var resp *http.Response
-	var err error
-	for retry := 0; retry <= t.maxRetry; retry++ {
-		err = t.limiter.Wait(req.Context())
-		if err != nil {
-			return nil, err
-		}
-
-		resp, err = t.base.RoundTrip(req)
-		if err != nil {
-			return nil, err
-		}
-
-		if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
-			return resp, nil
-		}
-
-		if retry == t.maxRetry {
-			return resp, nil
-		}
-
-		retryAfter := resp.Header.Get("Retry-After")
-		if retryAfter != "" {
-			if seconds, err := time.ParseDuration(retryAfter + "s"); err == nil {
-				time.Sleep(seconds)
-			}
-		} else {
-			time.Sleep(time.Duration(retry+1) * time.Second)
-		}
-
-		resp.Body.Close()
-	}
-
-	return resp, err
 }
 
 func (g *GitHubClient) RepoID(ctx context.Context) (int64, error) {
