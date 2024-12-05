@@ -31,8 +31,6 @@ func Trigger(ctx context.Context, message v1alpha1.NotificationMessage) error {
 		if err := handleWebhooks(ctx, message); err != nil {
 			ll.WithError(err).Error("failed to handle webhooks")
 			errs = append(errs, err)
-		} else {
-			ll.Info("webhooks handled successfully")
 		}
 		wg.Done()
 	}()
@@ -41,8 +39,6 @@ func Trigger(ctx context.Context, message v1alpha1.NotificationMessage) error {
 		if err := handleSlack(ctx, message); err != nil {
 			ll.WithError(err).Error("failed to handle slack")
 			errs = append(errs, err)
-		} else {
-			ll.Info("slack handled successfully")
 		}
 		wg.Done()
 	}()
@@ -51,8 +47,6 @@ func Trigger(ctx context.Context, message v1alpha1.NotificationMessage) error {
 		if err := handleEmail(ctx, message); err != nil {
 			ll.WithError(err).Error("failed to handle email")
 			errs = append(errs, err)
-		} else {
-			ll.Info("email handled successfully")
 		}
 		wg.Done()
 	}()
