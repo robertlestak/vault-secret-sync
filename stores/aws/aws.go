@@ -16,11 +16,12 @@ import (
 )
 
 type AwsClient struct {
-	Name           string   `yaml:"name,omitempty" json:"name,omitempty"`
-	RoleArn        string   `yaml:"roleArn,omitempty" json:"roleArn,omitempty"`
-	Region         string   `yaml:"region,omitempty" json:"region,omitempty"`
-	EncryptionKey  string   `yaml:"encryptionKey,omitempty" json:"encryptionKey,omitempty"`
-	ReplicaRegions []string `yaml:"replicaRegions,omitempty" json:"replicaRegions,omitempty"`
+	Name           string            `yaml:"name,omitempty" json:"name,omitempty"`
+	RoleArn        string            `yaml:"roleArn,omitempty" json:"roleArn,omitempty"`
+	Region         string            `yaml:"region,omitempty" json:"region,omitempty"`
+	EncryptionKey  string            `yaml:"encryptionKey,omitempty" json:"encryptionKey,omitempty"`
+	ReplicaRegions []string          `yaml:"replicaRegions,omitempty" json:"replicaRegions,omitempty"`
+	Tags           map[string]string `yaml:"tags,omitempty" json:"tags,omitempty"`
 
 	client *secretsmanager.Client `yaml:"-" json:"-"`
 
@@ -192,6 +193,16 @@ func (c *AwsClient) createSecret(ctx context.Context, name string, secret []byte
 			rep = append(rep, rr)
 		}
 		csi.AddReplicaRegions = rep
+	}
+	if c.Tags != nil {
+		var tags []types.Tag
+		for k, v := range c.Tags {
+			tags = append(tags, types.Tag{
+				Key:   aws.String(k),
+				Value: aws.String(v),
+			})
+		}
+		csi.Tags = tags
 	}
 	_, err := c.client.CreateSecret(ctx, csi)
 	if err != nil {

@@ -78,12 +78,18 @@ spec:
       roleArn: "arn:aws:iam::123456789012:role/role-name"
       encryptionKey: "alias/aws/secretsmanager"
       replicaRegions: ["us-east-1"]
+      tags:
+        key: "value"
+        another: "tag"
   - github:
       repo: "example-repo"
       owner: "robertlestak"
   - gcp:
       project: "example-project"
       name: "example-secret"
+      labels:
+        key: "value"
+        another: "label"
   - http:
       url: "https://example.com/my/app"
       method: "POST"
@@ -261,6 +267,9 @@ The AWS destination driver will write the secret to AWS Secrets Manager.
       roleArn: "arn:aws:iam::123456789012:role/role-name" # optional, default empty. Set to a specific role to assume when writing to secrets manager
       encryptionKey: "alias/aws/secretsmanager" # optional, default empty. Set to a specific KMS key to use for encryption
       replicaRegions: [] # optional, default empty. Set to a list of regions to replicate the secret to
+      tags: # optional, default empty. Set to a map of tags to apply to the secret
+        key: "value"
+        another: "tag"
 ```
 
 #### GCP Secret Manager (Driver: `gcp`)
@@ -273,6 +282,9 @@ The GCP destination driver will write the secret to GCP Secret Manager in the sp
       project: "example-project"
       name: "example-secret"
       replicationLocations: [] # optional, default empty. Set to a list of regions to replicate the secret to. If empty, all regions will be used
+      labels: # optional, default empty. Set to a map of labels to apply to the secret
+        key: "value"
+        another: "label"
 ```
 
 Note that since GCP Secret Manager does not support the `/` character, the sync operator will replace `/` with `-` in the secret name. This generally only applies when using a regex source path.

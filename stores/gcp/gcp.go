@@ -15,9 +15,10 @@ import (
 )
 
 type GcpClient struct {
-	Project              string   `yaml:"project,omitempty" json:"project,omitempty"`
-	Name                 string   `yaml:"name,omitempty" json:"name,omitempty"`
-	ReplicationLocations []string `yaml:"replicationLocations,omitempty" json:"replicationLocations,omitempty"`
+	Project              string            `yaml:"project,omitempty" json:"project,omitempty"`
+	Name                 string            `yaml:"name,omitempty" json:"name,omitempty"`
+	ReplicationLocations []string          `yaml:"replicationLocations,omitempty" json:"replicationLocations,omitempty"`
+	Labels               map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`
 
 	client *secretmanager.Client `yaml:"-" json:"-"`
 }
@@ -177,6 +178,10 @@ func (c *GcpClient) createSecretWrapper(ctx context.Context, name string) error 
 	// add a label indicating this secret is managed by the event bus
 	sd.Labels = map[string]string{
 		"managed-by": "vault-secret-sync",
+	}
+	// add any additional user-provided labels
+	for k, v := range c.Labels {
+		sd.Labels[k] = v
 	}
 	if len(c.ReplicationLocations) == 0 {
 		sd.Replication = &secretmanagerpb.Replication{
