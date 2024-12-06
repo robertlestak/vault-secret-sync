@@ -16,6 +16,7 @@ func Trigger(ctx context.Context, message v1alpha1.NotificationMessage) error {
 		"action":        "notifications.Trigger",
 		"syncConfig":    message.VaultSecretSync.ObjectMeta.Name,
 		"syncNamespace": message.VaultSecretSync.ObjectMeta.Namespace,
+		"notifications": len(message.VaultSecretSync.Spec.Notifications),
 	})
 	l.Trace("start")
 	defer l.Trace("end")
@@ -24,35 +25,45 @@ func Trigger(ctx context.Context, message v1alpha1.NotificationMessage) error {
 		return nil
 	}
 	wg := &sync.WaitGroup{}
-	wg.Add(3)
+	var mu sync.Mutex
 	var errs []error
+	wg.Add(3)
 	go func() {
+		defer wg.Done()
 		ll := l.WithField("notificationType", "webhooks")
 		if err := handleWebhooks(ctx, message); err != nil {
 			ll.WithError(err).Error("failed to handle webhooks")
+			mu.Lock()
 			errs = append(errs, err)
+			mu.Unlock()
 		}
-		wg.Done()
 	}()
 	go func() {
+		defer wg.Done()
 		ll := l.WithField("notificationType", "slack")
 		if err := handleSlack(ctx, message); err != nil {
 			ll.WithError(err).Error("failed to handle slack")
+			mu.Lock()
 			errs = append(errs, err)
+			mu.Unlock()
 		}
-		wg.Done()
 	}()
 	go func() {
+		defer wg.Done()
 		ll := l.WithField("notificationType", "email")
 		if err := handleEmail(ctx, message); err != nil {
 			ll.WithError(err).Error("failed to handle email")
+			mu.Lock()
 			errs = append(errs, err)
+			mu.Unlock()
 		}
-		wg.Done()
 	}()
 	wg.Wait()
 	if len(errs) > 0 {
-		l.WithField("errors", errs).Error("failed to handle notifications")
+		l.WithFields(log.Fields{
+			"errorCount": len(errs),
+			"errors":     errs,
+		}).Errorf("failed to handle %d/%d notifications", len(errs), len(message.VaultSecretSync.Spec.Notifications))
 		return fmt.Errorf("failed to handle notifications: %v", errs)
 	} else {
 		l.Info("all notifications handled successfully")

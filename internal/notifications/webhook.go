@@ -11,6 +11,7 @@ import (
 	"github.com/robertlestak/vault-secret-sync/internal/backend"
 	"github.com/robertlestak/vault-secret-sync/internal/config"
 	"github.com/robertlestak/vault-secret-sync/pkg/kubesecret"
+	log "github.com/sirupsen/logrus"
 )
 
 func triggerWebhook(ctx context.Context, message v1alpha1.NotificationMessage, webhook v1alpha1.WebhookNotification) error {
@@ -39,11 +40,13 @@ func triggerWebhook(ctx context.Context, message v1alpha1.NotificationMessage, w
 	// Create the HTTP request
 	req, err := http.NewRequestWithContext(ctx, webhook.Method, webhook.URL, &payloadBuffer)
 	if err != nil {
+		log.WithError(err).Error("failed to create webhook request")
 		return fmt.Errorf("failed to create webhook request: %v", err)
 	}
 	if webhook.HeaderSecret != nil && *webhook.HeaderSecret != "" {
 		sc, err := kubesecret.GetSecret(ctx, message.VaultSecretSync.Namespace, *webhook.HeaderSecret)
 		if err != nil {
+			log.WithError(err).Error("failed to get secret for webhook headers")
 			return err
 		}
 		for key, value := range sc {
@@ -58,6 +61,7 @@ func triggerWebhook(ctx context.Context, message v1alpha1.NotificationMessage, w
 	// Execute the request
 	resp, err := c.Do(req)
 	if err != nil {
+		log.WithError(err).Error("failed to execute webhook request")
 		return fmt.Errorf("failed to execute webhook request: %v", err)
 	}
 	defer resp.Body.Close()
@@ -72,6 +76,7 @@ func triggerWebhook(ctx context.Context, message v1alpha1.NotificationMessage, w
 				string(backend.SyncStatusFailed),
 				fmt.Sprintf("webhook request failed with status %d", resp.StatusCode),
 			)
+			log.WithError(err).Error("failed to read response body")
 			return fmt.Errorf("webhook request failed with status %d", resp.StatusCode)
 		}
 		backend.WriteEvent(
@@ -98,36 +103,53 @@ func triggerWebhook(ctx context.Context, message v1alpha1.NotificationMessage, w
 type webhookJob struct {
 	webhook v1alpha1.WebhookNotification
 	message v1alpha1.NotificationMessage
-	error   error
+	Error   error
 }
 
 func webhookWorker(ctx context.Context, jobs chan webhookJob, res chan webhookJob) {
 	for job := range jobs {
 		if err := triggerWebhook(ctx, job.message, job.webhook); err != nil {
-			job.error = err
+			job.Error = err
 		}
 		res <- job
 	}
 }
 
 func handleWebhooks(ctx context.Context, message v1alpha1.NotificationMessage) error {
+	l := log.WithFields(log.Fields{
+		"pkg":              "notifications",
+		"action":           "notifications.handleWebhooks",
+		"notificationType": "webhooks",
+		"syncConfig":       message.VaultSecretSync.ObjectMeta.Name,
+		"syncNamespace":    message.VaultSecretSync.ObjectMeta.Namespace,
+	})
+	l.Trace("start")
+	defer l.Trace("end")
 	jobsToDo := []webhookJob{}
 NotifLoop:
 	for _, webhook := range message.VaultSecretSync.Spec.Notifications {
 		if webhook.Webhook == nil {
+			l.Debugf("skipping webhook notification: %v", webhook)
 			continue NotifLoop
 		}
-		for _, o := range webhook.Email.Events {
+	EventLoop:
+		for _, o := range webhook.Webhook.Events {
 			if o != message.Event {
-				continue NotifLoop
+				l.Debugf("skipping webhook notification: %v", webhook)
+				continue EventLoop
 			}
 		}
 		if webhook.Webhook != nil {
+			l.Debugf("adding webhook notification: %v", webhook)
 			jobsToDo = append(jobsToDo, webhookJob{
 				webhook: *webhook.Webhook,
 				message: message,
 			})
 		}
+	}
+	if len(jobsToDo) == 0 {
+		l.Debug("no webhooks to trigger")
+		return nil
 	}
 	workers := 10
 	jobs := make(chan webhookJob, len(jobsToDo))
@@ -145,12 +167,15 @@ NotifLoop:
 	var errs []error
 	for range jobsToDo {
 		job := <-res
-		if job.error != nil {
-			errs = append(errs, job.error)
+		if job.Error != nil {
+			errs = append(errs, job.Error)
 		}
 	}
 	if len(errs) > 0 {
+		l.WithField("errors", errs).Error("failed to trigger webhooks")
 		return fmt.Errorf("failed to trigger webhooks: %v", errs)
+	} else {
+		l.Info("all webhooks handled successfully")
 	}
 	return nil
 }

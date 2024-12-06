@@ -11,12 +11,15 @@ import (
 	"github.com/robertlestak/vault-secret-sync/internal/backend"
 	"github.com/robertlestak/vault-secret-sync/internal/config"
 	"github.com/robertlestak/vault-secret-sync/pkg/kubesecret"
+	log "github.com/sirupsen/logrus"
 )
 
 func sendSlackNotification(ctx context.Context, message v1alpha1.NotificationMessage, slack v1alpha1.SlackNotification) error {
+	l := log.WithFields(log.Fields{"action": "sendSlackNotification"})
 	if (slack.URL == nil || *slack.URL == "") && slack.URLSecret != nil && *slack.URLSecret != "" {
 		sc, err := kubesecret.GetSecret(ctx, message.VaultSecretSync.Namespace, *slack.URLSecret)
 		if err != nil {
+			l.WithError(err).Error("failed to get secret for Slack URL")
 			return err
 		}
 		sk := "url"
@@ -27,7 +30,9 @@ func sendSlackNotification(ctx context.Context, message v1alpha1.NotificationMes
 			vs := string(v)
 			slack.URL = &vs
 		} else {
-			return fmt.Errorf("secret %s does not contain key %s", *slack.URLSecret, sk)
+			err := fmt.Errorf("secret %s does not contain key %s", *slack.URLSecret, sk)
+			l.WithError(err).Error("failed to get Slack URL from secret")
+			return err
 		}
 	}
 	if slack.Body == "" && config.Config.Notifications.Slack.Message != "" {
@@ -44,6 +49,7 @@ func sendSlackNotification(ctx context.Context, message v1alpha1.NotificationMes
 			string(backend.SyncStatusFailed),
 			fmt.Sprintf("failed to marshal Slack notification payload: %v", err),
 		)
+		l.WithError(err).Error("failed to marshal Slack notification payload")
 		return err
 	}
 	if (slack.URL == nil || *slack.URL == "") && config.Config.Notifications.Slack.URL != "" {
@@ -59,6 +65,7 @@ func sendSlackNotification(ctx context.Context, message v1alpha1.NotificationMes
 			string(backend.SyncStatusFailed),
 			fmt.Sprintf("failed to send Slack notification: %v", err),
 		)
+		l.WithError(err).Error("failed to send Slack notification")
 		return err
 	}
 	defer resp.Body.Close()
@@ -72,7 +79,9 @@ func sendSlackNotification(ctx context.Context, message v1alpha1.NotificationMes
 			string(backend.SyncStatusFailed),
 			fmt.Sprintf("failed to send Slack notification, status code: %d", resp.StatusCode),
 		)
-		return fmt.Errorf("failed to send Slack notification, status code: %d", resp.StatusCode)
+		err := fmt.Errorf("failed to send Slack notification, status code: %d", resp.StatusCode)
+		l.WithError(err).Error("failed to send Slack notification")
+		return err
 	}
 	backend.WriteEvent(
 		ctx,
@@ -82,40 +91,58 @@ func sendSlackNotification(ctx context.Context, message v1alpha1.NotificationMes
 		"SlackNotificationSent",
 		"Slack notification sent successfully",
 	)
+	l.Info("Slack notification sent successfully")
 	return nil
 }
 
 type slackJob struct {
 	slack   v1alpha1.SlackNotification
 	message v1alpha1.NotificationMessage
-	error   error
+	Error   error
 }
 
 func slackWorker(ctx context.Context, jobs chan slackJob, res chan slackJob) {
 	for job := range jobs {
 		if err := sendSlackNotification(ctx, job.message, job.slack); err != nil {
-			job.error = err
+			job.Error = err
 		}
 		res <- job
 	}
 }
 
 func handleSlack(ctx context.Context, message v1alpha1.NotificationMessage) error {
+	l := log.WithFields(log.Fields{
+		"pkg":              "notifications",
+		"action":           "notifications.handleSlack",
+		"notificationType": "slack",
+		"syncConfig":       message.VaultSecretSync.ObjectMeta.Name,
+		"syncNamespace":    message.VaultSecretSync.ObjectMeta.Namespace,
+	})
+	l.Trace("start")
+	defer l.Trace("end")
 	jobsToDo := []slackJob{}
 NotifLoop:
 	for _, slack := range message.VaultSecretSync.Spec.Notifications {
 		if slack.Slack == nil {
+			l.Debugf("skipping Slack notification: %v", slack)
 			continue NotifLoop
 		}
+	EventLoop:
 		for _, o := range slack.Slack.Events {
 			if o != message.Event {
-				continue NotifLoop
+				l.Debugf("skipping Slack notification: %v", slack)
+				continue EventLoop
 			}
 		}
+		l.Debugf("adding Slack notification: %v", slack)
 		jobsToDo = append(jobsToDo, slackJob{
 			slack:   *slack.Slack,
 			message: message,
 		})
+	}
+	if len(jobsToDo) == 0 {
+		l.Debug("no webhooks to trigger")
+		return nil
 	}
 	workers := 10
 	jobs := make(chan slackJob, len(jobsToDo))
@@ -133,12 +160,15 @@ NotifLoop:
 	var errs []error
 	for range jobsToDo {
 		job := <-res
-		if job.error != nil {
-			errs = append(errs, job.error)
+		if job.Error != nil {
+			errs = append(errs, job.Error)
 		}
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("failed to trigger slacks: %v", errs)
+		l.WithField("errors", errs).Error("failed to trigger Slack notifications")
+		return fmt.Errorf("failed to trigger Slack notifications: %v", errs)
+	} else {
+		l.Info("all Slack notifications handled successfully")
 	}
 	return nil
 }

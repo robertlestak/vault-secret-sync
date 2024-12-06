@@ -16,7 +16,7 @@ func createEmail(message v1alpha1.NotificationMessage, email v1alpha1.EmailNotif
 	l := log.WithFields(log.Fields{"action": "createEmail"})
 	l.Debugf("creating email notification: %v", email)
 	if email.To == "" {
-		return nil, fmt.Errorf("email notification is missing required")
+		return nil, fmt.Errorf("email notification is missing required 'To' field")
 	}
 	if config.Config.Notifications == nil {
 		config.Config.Notifications = &config.NotificationsConfig{}
@@ -126,34 +126,51 @@ func sendEmailNotification(ctx context.Context, message v1alpha1.NotificationMes
 type emailJob struct {
 	email   v1alpha1.EmailNotification
 	message v1alpha1.NotificationMessage
-	error   error
+	Error   error
 }
 
 func emailWorker(ctx context.Context, jobs chan emailJob, res chan emailJob) {
 	for job := range jobs {
 		if err := sendEmailNotification(ctx, job.message, job.email); err != nil {
-			job.error = err
+			job.Error = err
 		}
 		res <- job
 	}
 }
 
 func handleEmail(ctx context.Context, message v1alpha1.NotificationMessage) error {
+	l := log.WithFields(log.Fields{
+		"pkg":              "notifications",
+		"action":           "notifications.handleEmail",
+		"notificationType": "email",
+		"syncConfig":       message.VaultSecretSync.ObjectMeta.Name,
+		"syncNamespace":    message.VaultSecretSync.ObjectMeta.Namespace,
+	})
+	l.Trace("start")
+	defer l.Trace("end")
 	jobsToDo := []emailJob{}
 NotifLoop:
 	for _, email := range message.VaultSecretSync.Spec.Notifications {
 		if email.Email == nil {
+			l.Debugf("skipping email notification: %v", email)
 			continue NotifLoop
 		}
+	EventLoop:
 		for _, o := range email.Email.Events {
 			if o != message.Event {
-				continue NotifLoop
+				l.Debugf("skipping email notification: %v != %v", o, message.Event)
+				continue EventLoop
 			}
 		}
+		l.Debugf("adding email notification: %v", email)
 		jobsToDo = append(jobsToDo, emailJob{
 			email:   *email.Email,
 			message: message,
 		})
+	}
+	if len(jobsToDo) == 0 {
+		l.Debug("no webhooks to trigger")
+		return nil
 	}
 	workers := 10
 	jobs := make(chan emailJob, len(jobsToDo))
@@ -171,12 +188,14 @@ NotifLoop:
 	var errs []error
 	for range jobsToDo {
 		job := <-res
-		if job.error != nil {
-			errs = append(errs, job.error)
+		if job.Error != nil {
+			errs = append(errs, job.Error)
 		}
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("failed to trigger emails: %v", errs)
+	} else {
+		l.Info("all email notifications handled successfully")
 	}
 	return nil
 }
