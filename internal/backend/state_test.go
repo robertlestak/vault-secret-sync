@@ -123,9 +123,22 @@ func TestTenantNamespaceConfigs(t *testing.T) {
 		},
 	}
 
+	syncConfig4 := v1alpha1.VaultSecretSync{
+		ObjectMeta: metav1alpha1.ObjectMeta{
+			Name:      "config4",
+			Namespace: "namespace1",
+		},
+		Spec: v1alpha1.VaultSecretSyncSpec{
+			Source: &vault.VaultClient{
+				Address:   "tenant1/",
+				Namespace: "namespace1/",
+			},
+		},
+	}
+
 	SyncMaps = map[TenantName]TenantSyncs{
 		"tenant1": {
-			"namespace1": []v1alpha1.VaultSecretSync{syncConfig1, syncConfig3},
+			"namespace1": []v1alpha1.VaultSecretSync{syncConfig1, syncConfig3, syncConfig4},
 		},
 		"tenant2": {
 			"namespace2": []v1alpha1.VaultSecretSync{syncConfig2},
@@ -139,9 +152,10 @@ func TestTenantNamespaceConfigs(t *testing.T) {
 
 	result := TenantNamespaceConfigs(evt)
 
-	assert.Len(t, result, 2)
+	assert.Len(t, result, 3)
 	assert.Contains(t, result, syncConfig1)
 	assert.Contains(t, result, syncConfig3)
+	assert.Contains(t, result, syncConfig4)
 }
 
 func TestAddSyncConfig_DuplicateAddressNamespacePath(t *testing.T) {

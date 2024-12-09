@@ -8,6 +8,7 @@ import (
 
 	"github.com/robertlestak/vault-secret-sync/api/v1alpha1"
 	"github.com/robertlestak/vault-secret-sync/internal/event"
+	log "github.com/sirupsen/logrus"
 )
 
 type TenantName string
@@ -82,8 +83,19 @@ func GetSyncConfigByName(name string) (v1alpha1.VaultSecretSync, error) {
 }
 
 func TenantNamespaceConfigs(evt event.VaultEvent) []v1alpha1.VaultSecretSync {
+	l := log.WithFields(log.Fields{
+		"action":  "TenantNamespaceConfigs",
+		"eventId": evt.ID,
+		"path":    evt.Path,
+		"op":      evt.Operation,
+	})
 	ns := strings.TrimRight(evt.Namespace, "/")
 	ns = cmp.Or(ns, "default")
+	l = l.WithFields(log.Fields{"namespace": ns})
+	evt.Address = strings.TrimRight(evt.Address, "/")
+	l = l.WithFields(log.Fields{"tenant": evt.Address})
+	l.Trace("start")
+	defer l.Trace("end")
 	tn := TenantName(evt.Address)
 	tns := TenantNamespace(ns)
 	var result []v1alpha1.VaultSecretSync

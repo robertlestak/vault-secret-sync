@@ -407,7 +407,13 @@ func doSync(ctx context.Context, j SyncJob) error {
 }
 
 func buildSyncJobs(evt event.VaultEvent) ([]SyncJob, []string, []driver.DriverName) {
-	l := log.WithFields(log.Fields{"action": "buildSyncJobs"})
+	l := log.WithFields(log.Fields{
+		"action":  "buildSyncJobs",
+		"eventId": evt.ID,
+		"op":      evt.Operation,
+		"path":    evt.Path,
+		"tenant":  evt.Address,
+	})
 	l.Trace("start")
 	defer l.Trace("end")
 	var jobHolder []SyncJob
