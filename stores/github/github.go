@@ -239,7 +239,7 @@ func (g *GitHubClient) CreateClient(ctx context.Context) error {
 	limiter := rate.NewLimiter(rate.Every(time.Second/2), 1)
 
 	// Get max retry from env or use default
-	maxRetry := 10
+	maxRetry := 100
 	if val := os.Getenv("GITHUB_MAX_RETRY"); val != "" {
 		if pv, err := strconv.Atoi(val); err == nil {
 			maxRetry = pv
