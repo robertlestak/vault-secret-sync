@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/GoKillers/libsodium-go/cryptobox"
@@ -352,13 +353,23 @@ func (g *GitHubClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 			}
 			_, err = g.client.Actions.CreateOrUpdateEnvSecret(ctx, int(rid), g.Env, esecret)
 			if err != nil {
-				writeErrs[k] = err
+				// if the error contains "404 Not Found", then the environment does not exist
+				if strings.Contains(err.Error(), "404 Not Found") {
+					writeErrs[k] = fmt.Errorf("environment %s does not exist", g.Env)
+				} else {
+					writeErrs[k] = err
+				}
 				continue
 			}
 		} else {
 			_, err = g.client.Actions.CreateOrUpdateRepoSecret(ctx, g.Owner, g.Repo, esecret)
 			if err != nil {
-				writeErrs[k] = err
+				// if the error contains "404 Not Found", then the repo does not exist
+				if strings.Contains(err.Error(), "404 Not Found") {
+					writeErrs[k] = fmt.Errorf("repo %s does not exist", g.Repo)
+				} else {
+					writeErrs[k] = err
+				}
 				continue
 			}
 		}
@@ -393,11 +404,19 @@ func (g *GitHubClient) DeleteSecret(ctx context.Context, secret string) error {
 				return err
 			}
 			if _, err := g.client.Actions.DeleteEnvSecret(ctx, int(rid), g.Env, s); err != nil {
-				return err
+				if strings.Contains(err.Error(), "404 Not Found") {
+					return fmt.Errorf("environment %s does not exist", g.Env)
+				} else {
+					return err
+				}
 			}
 		} else {
 			if _, err := g.client.Actions.DeleteRepoSecret(ctx, g.Owner, g.Repo, s); err != nil {
-				return err
+				if strings.Contains(err.Error(), "404 Not Found") {
+					return fmt.Errorf("repo %s does not exist", g.Repo)
+				} else {
+					return err
+				}
 			}
 		}
 	}
