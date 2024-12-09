@@ -132,14 +132,23 @@ func findHighestNonRegexPath(p string) string {
 }
 
 func ScheduleSync(ctx context.Context, e event.VaultEvent) error {
-	l := log.WithFields(log.Fields{"action": "ScheduleSync"})
-	l.Trace("start")
-	defer l.Trace("end")
+	l := log.WithFields(log.Fields{
+		"action":  "ScheduleSync",
+		"eventId": e.ID,
+		"op":      e.Operation,
+		"path":    e.Path,
+		"tenant":  e.Address,
+	})
+	if e.Namespace != "" {
+		l = l.WithField("namespace", e.Namespace)
+	}
 
 	if e.ID == "" {
 		e.ID = uuid.New().String()
+		l = l.WithField("eventId", e.ID)
 	}
-
+	l.Trace("start")
+	defer l.Trace("end")
 	if err := queue.Q.Publish(ctx, e); err != nil {
 		l.Error(err)
 		return err
