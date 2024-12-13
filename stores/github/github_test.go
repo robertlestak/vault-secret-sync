@@ -2,10 +2,10 @@ package github
 
 import (
 	"context"
-	"fmt"
+	"io"
 	"net/http"
-	"net/http/httptest"
-	"sync"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,386 +14,265 @@ import (
 	"golang.org/x/time/rate"
 )
 
-type TestServer struct {
-	mu        sync.Mutex
-	callCount int
-	reqTimes  []time.Time
+// mockTransport implements http.RoundTripper for testing
+type mockTransport struct {
+	responses []*http.Response
+	requests  []*http.Request
+	index     int
 }
 
-func (ts *TestServer) handle(w http.ResponseWriter, r *http.Request) {
-	ts.mu.Lock()
-	ts.callCount++
-	currentCount := ts.callCount
-	ts.reqTimes = append(ts.reqTimes, time.Now())
-	ts.mu.Unlock()
-
-	if currentCount > 5 {
-		w.Header().Set("Retry-After", "1")
-		w.WriteHeader(http.StatusForbidden)
-		// one would think 429 is the right code but github returns 403 on rate limit :/
-		//w.WriteHeader(http.StatusTooManyRequests)
-		return
+func (m *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	m.requests = append(m.requests, req)
+	if m.index >= len(m.responses) {
+		return m.responses[len(m.responses)-1], nil
 	}
-	w.WriteHeader(http.StatusOK)
+	resp := m.responses[m.index]
+	m.index++
+	return resp, nil
 }
 
-func TestRateLimitedTransport_BasicRetry(t *testing.T) {
-	// Create transport with test settings
-	limiter := rate.NewLimiter(rate.Every(100*time.Millisecond), 1)
-	transport := &rateLimitedTransport{
-		base:     http.DefaultTransport,
-		limiter:  limiter,
-		maxRetry: 3,
-	}
-
-	ts := &TestServer{}
-	server := httptest.NewServer(http.HandlerFunc(ts.handle))
-	defer server.Close()
-
-	// Test single request with retries
-	req, err := http.NewRequestWithContext(
-		context.Background(),
-		"GET",
-		server.URL,
-		nil,
-	)
-	require.NoError(t, err)
-
-	resp, err := transport.RoundTrip(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+// mockResponseBody implements io.ReadCloser for testing
+type mockResponseBody struct {
+	io.Reader
+	closeCount int
 }
 
-func TestRateLimitedTransport_ConcurrentRequests(t *testing.T) {
-	// Create transport with test settings
-	limiter := rate.NewLimiter(rate.Every(100*time.Millisecond), 1)
-	transport := &rateLimitedTransport{
-		base:     http.DefaultTransport,
-		limiter:  limiter,
-		maxRetry: 3,
+func (m *mockResponseBody) Close() error {
+	m.closeCount++
+	return nil
+}
+
+func createResponse(statusCode int, headers map[string]string, body string) *http.Response {
+	resp := &http.Response{
+		StatusCode: statusCode,
+		Header:     make(http.Header),
+		Body:       &mockResponseBody{Reader: strings.NewReader(body)},
+	}
+	for k, v := range headers {
+		resp.Header.Set(k, v)
+	}
+	return resp
+}
+
+func TestRateLimitedTransport_CalculateRetryDelay(t *testing.T) {
+	tests := []struct {
+		name          string
+		response      *http.Response
+		expectedDelay time.Duration
+	}{
+		{
+			name: "403 with Retry-After header",
+			response: createResponse(403, map[string]string{
+				"Retry-After": "30",
+			}, ""),
+			expectedDelay: 30 * time.Second,
+		},
+		{
+			name:          "403 without Retry-After header",
+			response:      createResponse(403, map[string]string{}, ""),
+			expectedDelay: 60 * time.Second,
+		},
+		{
+			name: "Rate limit with reset time",
+			response: createResponse(429, map[string]string{
+				"X-RateLimit-Remaining": "0",
+				"X-RateLimit-Reset":     strconv.FormatInt(time.Now().Add(10*time.Second).Unix(), 10),
+			}, ""),
+			expectedDelay: 12 * time.Second, // 10 seconds + 2 second buffer
+		},
+		{
+			name:          "Default backoff",
+			response:      createResponse(429, map[string]string{}, ""),
+			expectedDelay: 10 * time.Second,
+		},
 	}
 
-	ts := &TestServer{}
-	server := httptest.NewServer(http.HandlerFunc(ts.handle))
-	defer server.Close()
-
-	// Make concurrent requests
-	var wg sync.WaitGroup
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			req, err := http.NewRequestWithContext(ctx, "GET", server.URL, nil)
-			if err != nil {
-				t.Logf("Error creating request: %v", err)
-				return
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &rateLimitedTransport{
+				base:    http.DefaultTransport,
+				limiter: rate.NewLimiter(rate.Every(time.Second), 1),
 			}
+
+			delay := transport.calculateRetryDelay(tt.response)
+
+			// Allow for small variations in time-based tests
+			if tt.name == "Rate limit with reset time" {
+				assert.InDelta(t, tt.expectedDelay, delay, float64(3*time.Second))
+			} else {
+				assert.Equal(t, tt.expectedDelay, delay)
+			}
+		})
+	}
+}
+
+func TestRateLimitedTransport_ShouldRetry(t *testing.T) {
+	tests := []struct {
+		name     string
+		response *http.Response
+		want     bool
+	}{
+		{
+			name:     "Should retry on 429",
+			response: &http.Response{StatusCode: 429},
+			want:     true,
+		},
+		{
+			name:     "Should retry on 403",
+			response: &http.Response{StatusCode: 403},
+			want:     true,
+		},
+		{
+			name:     "Should retry on 500",
+			response: &http.Response{StatusCode: 500},
+			want:     true,
+		},
+		{
+			name:     "Should not retry on 200",
+			response: &http.Response{StatusCode: 200},
+			want:     false,
+		},
+		{
+			name:     "Should not retry on 400",
+			response: &http.Response{StatusCode: 400},
+			want:     false,
+		},
+	}
+
+	transport := &rateLimitedTransport{
+		base:    http.DefaultTransport,
+		limiter: rate.NewLimiter(rate.Every(time.Second), 1),
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := transport.shouldRetry(tt.response)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestRateLimitedTransport_RoundTrip(t *testing.T) {
+	tests := []struct {
+		name            string
+		responses       []*http.Response
+		expectedRetries int
+		expectError     bool
+		contextTimeout  time.Duration
+	}{
+		{
+			name: "Success on first try",
+			responses: []*http.Response{
+				createResponse(200, nil, "success"),
+			},
+			expectedRetries: 0,
+			expectError:     false,
+		},
+		{
+			name: "Success after rate limit",
+			responses: []*http.Response{
+				createResponse(429, map[string]string{
+					"Retry-After": "1",
+				}, "rate limited"),
+				createResponse(200, nil, "success"),
+			},
+			expectedRetries: 1,
+			expectError:     false,
+		},
+		{
+			name: "Context cancellation",
+			responses: []*http.Response{
+				createResponse(429, map[string]string{
+					"Retry-After": "5",
+				}, "rate limited"),
+			},
+			expectedRetries: 0,
+			expectError:     true,
+			contextTimeout:  100 * time.Millisecond,
+		},
+		{
+			name: "Multiple retries before success",
+			responses: []*http.Response{
+				createResponse(429, map[string]string{"Retry-After": "1"}, "rate limited"),
+				createResponse(403, map[string]string{"Retry-After": "1"}, "forbidden"),
+				createResponse(500, nil, "server error"),
+				createResponse(200, nil, "success"),
+			},
+			expectedRetries: 3,
+			expectError:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tt.contextTimeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tt.contextTimeout)
+				defer cancel()
+			}
+
+			mock := &mockTransport{responses: tt.responses}
+			transport := &rateLimitedTransport{
+				base:    mock,
+				limiter: rate.NewLimiter(rate.Every(time.Millisecond), 1), // Fast limiter for tests
+			}
+
+			req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/test", nil)
+			require.NoError(t, err)
 
 			resp, err := transport.RoundTrip(req)
-			if err != nil {
-				if ctx.Err() != nil {
-					// Expected timeout for some requests
-					return
-				}
-				t.Logf("Error in RoundTrip: %v", err)
-				return
-			}
-			resp.Body.Close()
-		}()
-	}
 
-	// Wait with timeout
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// Test completed successfully
-	case <-time.After(10 * time.Second):
-		t.Fatal("Test timed out")
-	}
-
-	// Verify we got some rate limit responses
-	ts.mu.Lock()
-	totalCalls := ts.callCount
-	ts.mu.Unlock()
-
-	assert.True(t, totalCalls > 5, "Expected more than 5 calls, got %d", totalCalls)
-}
-
-func TestRateLimitedTransport_ExponentialBackoff(t *testing.T) {
-	// Create transport with test settings
-	limiter := rate.NewLimiter(rate.Every(50*time.Millisecond), 1)
-	transport := &rateLimitedTransport{
-		base:     http.DefaultTransport,
-		limiter:  limiter,
-		maxRetry: 3,
-	}
-
-	callCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		if callCount <= 3 {
-			w.Header().Set("Retry-After", "1")
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	start := time.Now()
-
-	req, err := http.NewRequestWithContext(
-		context.Background(),
-		"GET",
-		server.URL,
-		nil,
-	)
-	require.NoError(t, err)
-
-	resp, err := transport.RoundTrip(req)
-	duration := time.Since(start)
-
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	// Should have retried 3 times before success
-	assert.Equal(t, 4, callCount)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	// With exponential backoff, should take at least 3 seconds
-	// (1 + 2 + 4 = 7 seconds of backoff minimum)
-	assert.True(t, duration >= 3*time.Second,
-		"Expected duration >= 3s, got %v", duration)
-}
-
-func TestRateLimitedTransport_SecondaryRateLimit(t *testing.T) {
-	limiter := rate.NewLimiter(rate.Every(50*time.Millisecond), 1)
-	transport := &rateLimitedTransport{
-		base:     http.DefaultTransport,
-		limiter:  limiter,
-		maxRetry: 3,
-	}
-
-	// GitHub sometimes sends secondary rate limits with 403 status code
-	// and different headers
-	callCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		if callCount <= 2 {
-			w.Header().Set("X-RateLimit-Remaining", "0")
-			w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(2*time.Second).Unix()))
-			w.WriteHeader(http.StatusForbidden) // GitHub uses 403 for secondary rate limits
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	req, err := http.NewRequestWithContext(
-		context.Background(),
-		"GET",
-		server.URL,
-		nil,
-	)
-	require.NoError(t, err)
-
-	resp, err := transport.RoundTrip(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, 3, callCount)
-}
-
-func TestRateLimitedTransport_ContextCancellation(t *testing.T) {
-	limiter := rate.NewLimiter(rate.Every(50*time.Millisecond), 1)
-	transport := &rateLimitedTransport{
-		base:     http.DefaultTransport,
-		limiter:  limiter,
-		maxRetry: 5,
-	}
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Retry-After", "2")
-		w.WriteHeader(http.StatusForbidden)
-	}))
-	defer server.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "GET", server.URL, nil)
-	require.NoError(t, err)
-
-	_, err = transport.RoundTrip(req)
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, context.DeadlineExceeded)
-}
-
-func TestRateLimitedTransport_RetryAfterWithFuture(t *testing.T) {
-	limiter := rate.NewLimiter(rate.Every(50*time.Millisecond), 1)
-	transport := &rateLimitedTransport{
-		base:     http.DefaultTransport,
-		limiter:  limiter,
-		maxRetry: 3,
-	}
-
-	callCount := 0
-	// Set reset time to 2 seconds in the future
-	resetTime := time.Now().Add(2 * time.Second).Unix()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		if callCount == 1 {
-			w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", resetTime))
-			w.Header().Set("X-RateLimit-Remaining", "0")
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	ctx := context.Background()
-	req, err := http.NewRequestWithContext(ctx, "GET", server.URL, nil)
-	require.NoError(t, err)
-
-	start := time.Now()
-	resp, err := transport.RoundTrip(req)
-	duration := time.Since(start)
-
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	// Verify response
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, 2, callCount, "Expected exactly 2 calls")
-
-	// Verify timing - should wait close to 2 seconds
-	// Allow for some scheduling variance (1.8s minimum)
-	assert.True(t, duration >= 1800*time.Millisecond,
-		"Expected duration >= 1.8s for rate limit reset, got %v", duration)
-	// Shouldn't wait too much longer than necessary
-	assert.True(t, duration <= 3*time.Second,
-		"Expected duration <= 3s, got %v", duration)
-}
-
-func TestRateLimitedTransport_BurstRequests(t *testing.T) {
-	limiter := rate.NewLimiter(rate.Every(100*time.Millisecond), 1)
-	transport := &rateLimitedTransport{
-		base:     http.DefaultTransport,
-		limiter:  limiter,
-		maxRetry: 3,
-	}
-
-	ts := &TestServer{}
-	server := httptest.NewServer(http.HandlerFunc(ts.handle))
-	defer server.Close()
-
-	// Send burst of requests simultaneously
-	const numRequests = 20
-	responses := make(chan *http.Response, numRequests)
-	errors := make(chan error, numRequests)
-
-	var wg sync.WaitGroup
-	start := time.Now()
-
-	for i := 0; i < numRequests; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			req, err := http.NewRequest("GET", server.URL, nil)
-			if err != nil {
-				errors <- err
+			if tt.expectError {
+				assert.Error(t, err)
 				return
 			}
 
-			resp, err := transport.RoundTrip(req)
-			if err != nil {
-				errors <- err
-				return
+			assert.NoError(t, err)
+			assert.NotNil(t, resp)
+			assert.Equal(t, 200, resp.StatusCode)
+			assert.Equal(t, tt.expectedRetries+1, len(mock.requests))
+
+			// Verify all response bodies were closed
+			for _, res := range tt.responses[:len(mock.requests)-1] {
+				body := res.Body.(*mockResponseBody)
+				assert.Equal(t, 1, body.closeCount, "Response body should be closed after retry")
 			}
-			responses <- resp
-		}()
-	}
-
-	// Wait with timeout
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-		close(responses)
-		close(errors)
-	}()
-
-	select {
-	case <-done:
-		duration := time.Since(start)
-		// With rate limit of 100ms, 20 requests should take at least 2 seconds
-		assert.True(t, duration >= 2*time.Second)
-	case <-time.After(10 * time.Second):
-		t.Fatal("Test timed out")
-	}
-
-	// Check errors
-	for err := range errors {
-		assert.NoError(t, err)
-	}
-
-	// Close all responses
-	for resp := range responses {
-		resp.Body.Close()
+		})
 	}
 }
 
-func TestRateLimitedTransport_NoRetryAfterHeader(t *testing.T) {
-	limiter := rate.NewLimiter(rate.Every(50*time.Millisecond), 1)
-	transport := &rateLimitedTransport{
-		base:     http.DefaultTransport,
-		limiter:  limiter,
-		maxRetry: 3,
+func TestRateLimitedTransport_RequestBodyHandling(t *testing.T) {
+	responses := []*http.Response{
+		createResponse(429, map[string]string{"Retry-After": "1"}, "rate limited"),
+		createResponse(200, nil, "success"),
 	}
 
-	callCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		if callCount <= 2 {
-			// No Retry-After header, should use exponential backoff
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	mock := &mockTransport{responses: responses}
+	transport := &rateLimitedTransport{
+		base:    mock,
+		limiter: rate.NewLimiter(rate.Every(time.Millisecond), 1),
+	}
 
-	start := time.Now()
-	req, err := http.NewRequestWithContext(
-		context.Background(),
-		"GET",
-		server.URL,
-		nil,
-	)
+	// Create a request with a body
+	body := "test request body"
+	req, err := http.NewRequest("POST", "https://api.github.com/test",
+		strings.NewReader(body))
 	require.NoError(t, err)
+
+	// Ensure the body can be read multiple times
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader(body)), nil
+	}
 
 	resp, err := transport.RoundTrip(req)
-	duration := time.Since(start)
-
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	assert.Equal(t, 200, resp.StatusCode)
 
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	// Should have used exponential backoff
-	assert.True(t, duration >= 1500*time.Millisecond)
+	// Verify the body was sent in both requests
+	for _, r := range mock.requests {
+		bodyBytes, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		assert.Equal(t, body, string(bodyBytes))
+	}
 }
