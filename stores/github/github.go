@@ -145,9 +145,12 @@ func (t *rateLimitedTransport) shouldRetry(resp *http.Response) bool {
 func (t *rateLimitedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	var resp *http.Response
 	var err error
+	maxRetries := 10000
+	retryCount := 0
+	baseDelay := time.Second * 10 // Default exponential backoff base delay
 
-	for {
-		// Wait for rate limiter
+	for retryCount < maxRetries {
+		// Wait for the rate limiter
 		if err = t.limiter.Wait(req.Context()); err != nil {
 			return nil, fmt.Errorf("rate limiter wait: %w", err)
 		}
@@ -162,39 +165,47 @@ func (t *rateLimitedTransport) RoundTrip(req *http.Request) (*http.Response, err
 			reqClone.Body = body
 		}
 
+		// Make the request
 		resp, err = t.base.RoundTrip(reqClone)
 		if err != nil {
 			return nil, fmt.Errorf("round trip: %w", err)
 		}
 
-		// Check if we need to retry
+		// Successful response, return
 		if !t.shouldRetry(resp) {
 			return resp, nil
 		}
 
-		// Get retry delay
+		// Log and determine the delay
 		delay := t.calculateRetryDelay(resp)
+		if delay == 0 {
+			// Use exponential backoff if no explicit retry delay provided
+			delay = baseDelay * (1 << retryCount) // Exponential backoff
+		}
 
-		// Log retry attempt with detailed information
 		log.WithFields(log.Fields{
 			"status_code":    resp.StatusCode,
-			"delay":          delay.String(),
+			"retry_count":    retryCount + 1,
+			"retry_delay":    delay.String(),
 			"rate_remaining": resp.Header.Get("X-RateLimit-Remaining"),
 			"rate_reset":     resp.Header.Get("X-RateLimit-Reset"),
 			"retry_after":    resp.Header.Get("Retry-After"),
-		}).Debug("GitHub API rate limit hit, retrying request")
+		}).Warn("GitHub API rate limit hit, retrying request")
 
-		// Close response body before retry
+		// Close the response body to avoid leaking
 		resp.Body.Close()
 
-		// Wait for the calculated delay
+		// Wait before retrying
 		select {
 		case <-req.Context().Done():
 			return nil, req.Context().Err()
 		case <-time.After(delay):
+			retryCount++
 			continue
 		}
 	}
+
+	return resp, fmt.Errorf("max retries exceeded for request: %s", req.URL)
 }
 
 func (g *GitHubClient) CreateClient(ctx context.Context) error {
