@@ -282,7 +282,6 @@ func NeedsSync(sc v1alpha1.VaultSecretSync, evt event.VaultEvent) bool {
 
 	if sc.Spec.Suspend != nil && *sc.Spec.Suspend {
 		l.Trace("sync suspended")
-		backend.SetSyncStatus(context.TODO(), sc, backend.SyncStatusSuspended)
 		return false
 	}
 

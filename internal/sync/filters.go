@@ -30,6 +30,19 @@ func shouldDryRun(j SyncJob, dest SyncClient, sourcePath, destPath string) bool 
 		"sourcePath": sourcePath,
 		"destPath":   destPath,
 	})
+	if j.SyncConfig.Spec.Suspend != nil && *j.SyncConfig.Spec.Suspend {
+		l.Info("sync suspended")
+		backend.SetSyncStatus(context.TODO(), j.SyncConfig, backend.SyncStatusSuspended)
+		backend.WriteEvent(
+			context.TODO(),
+			j.SyncConfig.Namespace,
+			j.SyncConfig.Name,
+			"Normal",
+			string(backend.SyncStatusSuspended),
+			fmt.Sprintf("sync suspended: %s to %s: %s", sourcePath, dest.Driver(), destPath),
+		)
+		return true
+	}
 	if j.SyncConfig.Spec.DryRun != nil && *j.SyncConfig.Spec.DryRun {
 		l.Info("dry run")
 		backend.SetSyncStatus(context.TODO(), j.SyncConfig, backend.SyncStatusDryRun)
