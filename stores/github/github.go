@@ -499,7 +499,7 @@ func (g *GitHubClient) GetOrgPublicKey(ctx context.Context) (*github.PublicKey, 
 	// get org public key
 	k, _, err := g.client.Actions.GetOrgPublicKey(ctx, g.Owner)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error getting org public key %s: %w", g.Owner, err)
 	}
 	return k, nil
 }
@@ -508,11 +508,11 @@ func (g *GitHubClient) GetEnvPublicKey(ctx context.Context) (*github.PublicKey, 
 	// get env public key
 	rid, err := g.RepoID(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error getting repo ID %s: %w", g.Repo, err)
 	}
 	k, _, err := g.client.Actions.GetEnvPublicKey(ctx, int(rid), g.Env)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error getting env public key %s %s: %w", g.Repo, g.Env, err)
 	}
 	return k, nil
 }
@@ -521,7 +521,7 @@ func (g *GitHubClient) GetRepoPublicKey(ctx context.Context) (*github.PublicKey,
 	// get repo public key
 	k, _, err := g.client.Actions.GetRepoPublicKey(ctx, g.Owner, g.Repo)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error getting repo public key %s %s: %w", g.Owner, g.Repo, err)
 	}
 	return k, nil
 }
