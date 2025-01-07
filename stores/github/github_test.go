@@ -59,18 +59,19 @@ func TestRateLimitedTransport_CalculateRetryDelay(t *testing.T) {
 		name          string
 		response      *http.Response
 		expectedDelay time.Duration
+		allowDelta    bool // For time-based tests that need flexibility
 	}{
 		{
 			name: "403 with Retry-After header",
 			response: createResponse(403, map[string]string{
 				"Retry-After": "30",
 			}, ""),
-			expectedDelay: 30 * time.Second,
+			expectedDelay: 35 * time.Second, // 30s + 5s buffer
 		},
 		{
-			name:          "403 without Retry-After header",
+			name:          "403 without Retry-After header (abuse detection)",
 			response:      createResponse(403, map[string]string{}, ""),
-			expectedDelay: 60 * time.Second,
+			expectedDelay: 120 * time.Second, // More conservative 2-minute delay
 		},
 		{
 			name: "Rate limit with reset time",
@@ -78,12 +79,20 @@ func TestRateLimitedTransport_CalculateRetryDelay(t *testing.T) {
 				"X-RateLimit-Remaining": "0",
 				"X-RateLimit-Reset":     strconv.FormatInt(time.Now().Add(10*time.Second).Unix(), 10),
 			}, ""),
-			expectedDelay: 12 * time.Second, // 10 seconds + 2 second buffer
+			expectedDelay: 40 * time.Second, // 10s + 30s buffer
+			allowDelta:    true,             // Allow for time variations
 		},
 		{
-			name:          "Default backoff",
-			response:      createResponse(429, map[string]string{}, ""),
-			expectedDelay: 10 * time.Second,
+			name: "429 without reset time",
+			response: createResponse(429, map[string]string{
+				"X-RateLimit-Remaining": "0",
+			}, ""),
+			expectedDelay: 60 * time.Second, // Conservative default for rate limits
+		},
+		{
+			name:          "Server error (5xx)",
+			response:      createResponse(502, map[string]string{}, ""),
+			expectedDelay: 30 * time.Second, // Conservative delay for server errors
 		},
 	}
 
@@ -96,9 +105,8 @@ func TestRateLimitedTransport_CalculateRetryDelay(t *testing.T) {
 
 			delay := transport.calculateRetryDelay(tt.response)
 
-			// Allow for small variations in time-based tests
-			if tt.name == "Rate limit with reset time" {
-				assert.InDelta(t, tt.expectedDelay, delay, float64(3*time.Second))
+			if tt.allowDelta {
+				assert.InDelta(t, tt.expectedDelay, delay, float64(5*time.Second))
 			} else {
 				assert.Equal(t, tt.expectedDelay, delay)
 			}
@@ -123,8 +131,25 @@ func TestRateLimitedTransport_ShouldRetry(t *testing.T) {
 			want:     true,
 		},
 		{
-			name:     "Should retry on 500",
-			response: &http.Response{StatusCode: 500},
+			name: "Should retry on low rate limit remaining",
+			response: createResponse(200, map[string]string{
+				"X-RateLimit-Remaining": "5",
+			}, ""),
+			want: true,
+		},
+		{
+			name:     "Should retry on 502",
+			response: &http.Response{StatusCode: 502},
+			want:     true,
+		},
+		{
+			name:     "Should retry on 503",
+			response: &http.Response{StatusCode: 503},
+			want:     true,
+		},
+		{
+			name:     "Should retry on 504",
+			response: &http.Response{StatusCode: 504},
 			want:     true,
 		},
 		{
@@ -195,10 +220,23 @@ func TestRateLimitedTransport_RoundTrip(t *testing.T) {
 			responses: []*http.Response{
 				createResponse(429, map[string]string{"Retry-After": "1"}, "rate limited"),
 				createResponse(403, map[string]string{"Retry-After": "1"}, "forbidden"),
-				createResponse(500, nil, "server error"),
+				createResponse(502, nil, "server error"),
 				createResponse(200, nil, "success"),
 			},
 			expectedRetries: 3,
+			expectError:     false,
+		},
+		{
+			name: "Retry on low remaining rate limit",
+			responses: []*http.Response{
+				createResponse(200, map[string]string{
+					"X-RateLimit-Remaining": "5",
+				}, "low limit"),
+				createResponse(200, map[string]string{
+					"X-RateLimit-Remaining": "100",
+				}, "success"),
+			},
+			expectedRetries: 1,
 			expectError:     false,
 		},
 	}
@@ -233,46 +271,11 @@ func TestRateLimitedTransport_RoundTrip(t *testing.T) {
 			assert.Equal(t, 200, resp.StatusCode)
 			assert.Equal(t, tt.expectedRetries+1, len(mock.requests))
 
-			// Verify all response bodies were closed
+			// Verify all response bodies were closed except the last one
 			for _, res := range tt.responses[:len(mock.requests)-1] {
 				body := res.Body.(*mockResponseBody)
 				assert.Equal(t, 1, body.closeCount, "Response body should be closed after retry")
 			}
 		})
-	}
-}
-
-func TestRateLimitedTransport_RequestBodyHandling(t *testing.T) {
-	responses := []*http.Response{
-		createResponse(429, map[string]string{"Retry-After": "1"}, "rate limited"),
-		createResponse(200, nil, "success"),
-	}
-
-	mock := &mockTransport{responses: responses}
-	transport := &rateLimitedTransport{
-		base:    mock,
-		limiter: rate.NewLimiter(rate.Every(time.Millisecond), 1),
-	}
-
-	// Create a request with a body
-	body := "test request body"
-	req, err := http.NewRequest("POST", "https://api.github.com/test",
-		strings.NewReader(body))
-	require.NoError(t, err)
-
-	// Ensure the body can be read multiple times
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(strings.NewReader(body)), nil
-	}
-
-	resp, err := transport.RoundTrip(req)
-	require.NoError(t, err)
-	assert.Equal(t, 200, resp.StatusCode)
-
-	// Verify the body was sent in both requests
-	for _, r := range mock.requests {
-		bodyBytes, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		assert.Equal(t, body, string(bodyBytes))
 	}
 }

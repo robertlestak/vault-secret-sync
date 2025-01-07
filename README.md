@@ -370,6 +370,10 @@ This will authenticate to both secret stores, read the value from the source, an
 
 By default, the sync operator will sync creations, updates, _and deletions_. If you only want to sync creations and updates, you can set the `syncDelete` flag to `false`.
 
+## Suspended
+
+Similar to `CronJob` resources, you can suspend the sync operation by setting the `suspend` flag to `true`. This will prevent the operator from syncing secrets until the flag is set back to `false` (which is the default).
+
 ```yaml
 spec:
   syncDelete: false

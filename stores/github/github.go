@@ -106,51 +106,93 @@ type rateLimitedTransport struct {
 }
 
 func (t *rateLimitedTransport) calculateRetryDelay(resp *http.Response) time.Duration {
-	// First check for secondary rate limit (abuse detection)
-	if resp.StatusCode == 403 {
-		if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
-			if seconds, err := strconv.Atoi(retryAfter); err == nil {
-				return time.Duration(seconds) * time.Second
-			}
+	l := log.WithFields(log.Fields{
+		"status_code":    resp.StatusCode,
+		"rate_remaining": resp.Header.Get("X-RateLimit-Remaining"),
+		"rate_reset":     resp.Header.Get("X-RateLimit-Reset"),
+		"retry_after":    resp.Header.Get("Retry-After"),
+	})
+
+	// Check for Retry-After header first (primarily for secondary rate limits)
+	if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+		if seconds, err := strconv.Atoi(retryAfter); err == nil {
+			// Add buffer to the suggested retry time
+			delay := time.Duration(seconds) * time.Second
+			l.Infof("Using Retry-After header with delay: %v", delay)
+			return delay + (5 * time.Second)
 		}
-		// If no Retry-After header but it's a 403, use a longer default delay
-		return 60 * time.Second
 	}
 
-	// Check standard rate limit headers
-	remaining := resp.Header.Get("X-RateLimit-Remaining")
-	if remaining == "0" {
+	// Handle secondary rate limit (abuse detection)
+	if resp.StatusCode == 403 {
+		delay := 120 * time.Second // More conservative 2-minute delay for 403s
+		l.Infof("Detected abuse detection (403), using delay: %v", delay)
+		return delay
+	}
+
+	// Handle primary rate limit
+	if remaining := resp.Header.Get("X-RateLimit-Remaining"); remaining == "0" {
 		if resetStr := resp.Header.Get("X-RateLimit-Reset"); resetStr != "" {
 			if resetTime, err := strconv.ParseInt(resetStr, 10, 64); err == nil {
 				delay := time.Until(time.Unix(resetTime, 0))
 				if delay > 0 {
-					// Add a small buffer to ensure the rate limit has reset
-					return delay + (2 * time.Second)
+					// Add a 30-second buffer to ensure the rate limit has fully reset
+					delay += 30 * time.Second
+					l.Infof("Rate limit exhausted, waiting until reset plus buffer: %v", delay)
+					return delay
 				}
 			}
 		}
 	}
 
-	// Default exponential backoff for other cases
-	return time.Second * 10
+	// For any rate limit related response without explicit timing information
+	if resp.StatusCode == http.StatusTooManyRequests {
+		delay := 60 * time.Second // Conservative 1-minute delay
+		l.Infof("Received 429, using default delay: %v", delay)
+		return delay
+	}
+
+	// Default exponential backoff for other cases (like 500s)
+	delay := 30 * time.Second
+	l.Infof("Using default delay for status %d: %v", resp.StatusCode, delay)
+	return delay
 }
 
 func (t *rateLimitedTransport) shouldRetry(resp *http.Response) bool {
-	// Retry on rate limit (429), abuse detection (403), and server errors (500s)
-	return resp.StatusCode == http.StatusTooManyRequests ||
-		resp.StatusCode == http.StatusForbidden ||
-		(resp.StatusCode >= 500 && resp.StatusCode <= 599)
+	// Expanded retry conditions
+	switch resp.StatusCode {
+	case http.StatusTooManyRequests, // 429
+		http.StatusForbidden,          // 403
+		http.StatusBadGateway,         // 502
+		http.StatusServiceUnavailable, // 503
+		http.StatusGatewayTimeout:     // 504
+		return true
+	}
+
+	// Also retry if we're running low on remaining rate limit
+	if remaining := resp.Header.Get("X-RateLimit-Remaining"); remaining != "" {
+		if rem, err := strconv.Atoi(remaining); err == nil && rem < 10 {
+			return true // Preemptively retry if we're getting close to the limit
+		}
+	}
+
+	return false
 }
 
 func (t *rateLimitedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	l := log.WithFields(log.Fields{
+		"method": req.Method,
+		"url":    req.URL.String(),
+	})
+
 	var resp *http.Response
 	var err error
-	maxRetries := 10000
 	retryCount := 0
-	baseDelay := time.Second * 10 // Default exponential backoff base delay
+	maxRetries := 100000 // Effectively unlimited retries
+	baseDelay := 10 * time.Second
 
 	for retryCount < maxRetries {
-		// Wait for the rate limiter
+		// Always respect the rate limiter
 		if err = t.limiter.Wait(req.Context()); err != nil {
 			return nil, fmt.Errorf("rate limiter wait: %w", err)
 		}
@@ -168,34 +210,30 @@ func (t *rateLimitedTransport) RoundTrip(req *http.Request) (*http.Response, err
 		// Make the request
 		resp, err = t.base.RoundTrip(reqClone)
 		if err != nil {
-			return nil, fmt.Errorf("round trip: %w", err)
+			// Handle non-HTTP errors (like network issues)
+			delay := baseDelay * time.Duration(1<<uint(retryCount))
+			l.Warnf("Transport error: %v, retrying in %v", err, delay)
+			time.Sleep(delay)
+			retryCount++
+			continue
 		}
 
-		// Successful response, return
+		// Check if we need to retry
 		if !t.shouldRetry(resp) {
 			return resp, nil
 		}
 
-		// Log and determine the delay
+		// Calculate and apply backoff
 		delay := t.calculateRetryDelay(resp)
-		if delay == 0 {
-			// Use exponential backoff if no explicit retry delay provided
-			delay = baseDelay * (1 << retryCount) // Exponential backoff
-		}
 
-		log.WithFields(log.Fields{
-			"status_code":    resp.StatusCode,
-			"retry_count":    retryCount + 1,
-			"retry_delay":    delay.String(),
-			"rate_remaining": resp.Header.Get("X-RateLimit-Remaining"),
-			"rate_reset":     resp.Header.Get("X-RateLimit-Reset"),
-			"retry_after":    resp.Header.Get("Retry-After"),
-		}).Warn("GitHub API rate limit hit, retrying request")
+		l.WithFields(log.Fields{
+			"retry_count": retryCount + 1,
+			"delay":       delay.String(),
+			"status":      resp.StatusCode,
+		}).Info("Retrying request due to rate limit or server error")
 
-		// Close the response body to avoid leaking
 		resp.Body.Close()
 
-		// Wait before retrying
 		select {
 		case <-req.Context().Done():
 			return nil, req.Context().Err()
@@ -205,7 +243,7 @@ func (t *rateLimitedTransport) RoundTrip(req *http.Request) (*http.Response, err
 		}
 	}
 
-	return resp, fmt.Errorf("max retries exceeded for request: %s", req.URL)
+	return nil, fmt.Errorf("max retries exceeded for request: %s", req.URL)
 }
 
 func (g *GitHubClient) CreateClient(ctx context.Context) error {
@@ -235,8 +273,7 @@ func (g *GitHubClient) CreateClient(ctx context.Context) error {
 	}
 	installationTokenSource := githubauth.NewInstallationTokenSource(int64(g.InstallId), appTokenSource)
 
-	// Create a rate limiter - reduced to 2 requests per second to be more conservative
-	limiter := rate.NewLimiter(rate.Every(time.Second/2), 1)
+	limiter := rate.NewLimiter(rate.Every(2*time.Second), 1)
 
 	rateLimitedTransport := &rateLimitedTransport{
 		base:    http.DefaultTransport,
