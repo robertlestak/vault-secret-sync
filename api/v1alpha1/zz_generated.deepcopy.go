@@ -356,6 +356,11 @@ func (in *VaultSecretSyncSpec) DeepCopyInto(out *VaultSecretSyncSpec) {
 		*out = new(bool)
 		**out = **in
 	}
+	if in.Suspend != nil {
+		in, out := &in.Suspend, &out.Suspend
+		*out = new(bool)
+		**out = **in
+	}
 	if in.Filters != nil {
 		in, out := &in.Filters, &out.Filters
 		*out = new(FilterConfig)

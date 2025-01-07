@@ -124,6 +124,7 @@ type VaultSecretSyncSpec struct {
 	Dest          []*StoreConfig      `yaml:"dest" json:"dest"`
 	SyncDelete    *bool               `yaml:"syncDelete,omitempty" json:"syncDelete,omitempty"`
 	DryRun        *bool               `yaml:"dryRun,omitempty" json:"dryRun,omitempty"`
+	Suspend       *bool               `yaml:"suspend,omitempty" json:"suspend,omitempty"`
 	Filters       *FilterConfig       `yaml:"filters,omitempty" json:"filters,omitempty"`
 	Transforms    *TransformSpec      `json:"transforms,omitempty"`
 	Notifications []*NotificationSpec `json:"notifications,omitempty"`

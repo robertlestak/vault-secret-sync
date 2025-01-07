@@ -30,10 +30,11 @@ import (
 type SyncStatusString string
 
 const (
-	SyncStatusInit    SyncStatusString = "Initialized"
-	SyncStatusSuccess SyncStatusString = "Synced"
-	SyncStatusFailed  SyncStatusString = "Failed"
-	SyncStatusDryRun  SyncStatusString = "DryRun"
+	SyncStatusInit      SyncStatusString = "Initialized"
+	SyncStatusSuccess   SyncStatusString = "Synced"
+	SyncStatusFailed    SyncStatusString = "Failed"
+	SyncStatusDryRun    SyncStatusString = "DryRun"
+	SyncStatusSuspended SyncStatusString = "Suspended"
 )
 
 var (

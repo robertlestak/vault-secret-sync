@@ -1,5 +1,5 @@
 # First stage: build the Go application
-FROM golang:1.23.0 AS builder
+FROM golang:1.23.4 AS builder
 
 # Install dependencies
 RUN apt-get update -y && apt-get install -y curl build-essential unzip gcc make pkg-config

@@ -10,6 +10,8 @@ metadata:
   namespace: "default"
 spec:
   dryRun: false
+  syncDelete: false
+  suspend: false
   source:
     address: "https://vault.example.com"
     path: "foo/bar/(.*)"

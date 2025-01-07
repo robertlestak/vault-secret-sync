@@ -280,6 +280,12 @@ func NeedsSync(sc v1alpha1.VaultSecretSync, evt event.VaultEvent) bool {
 		"eventVault": evt.Address,
 	})
 
+	if sc.Spec.Suspend != nil && *sc.Spec.Suspend {
+		l.Trace("sync suspended")
+		backend.SetSyncStatus(context.TODO(), sc, backend.SyncStatusSuspended)
+		return false
+	}
+
 	if evt.SyncName != "" && backend.InternalName(sc.Namespace, sc.Name) != evt.SyncName {
 		l.Trace("no sync name match")
 		return false
