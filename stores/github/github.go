@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"strconv"
@@ -116,6 +117,31 @@ type rateLimitedTransport struct {
 	limiter *rate.Limiter
 }
 
+// calculateJitter adds random jitter to a base delay
+func calculateJitter(baseDelay time.Duration, attempt int) time.Duration {
+	// Calculate exponential backoff
+	expDelay := baseDelay * time.Duration(1<<uint(attempt))
+
+	// Cap the maximum delay at 10 minutes
+	if expDelay > 10*time.Minute {
+		expDelay = 10 * time.Minute
+	}
+
+	// Add random jitter between 0-100% of the delay
+	jitter := time.Duration(rand.Float64() * float64(expDelay))
+
+	return expDelay + jitter
+}
+
+// calculateRateLimitJitter adds jitter for rate limit specific scenarios
+func calculateRateLimitJitter(baseDelay time.Duration) time.Duration {
+	// Add 20-120% of the base delay as jitter
+	jitterPercent := 0.2 + rand.Float64()
+	jitter := time.Duration(float64(baseDelay) * jitterPercent)
+
+	return baseDelay + jitter
+}
+
 func (t *rateLimitedTransport) shouldRetry(resp *http.Response) bool {
 	// Expanded retry conditions
 	switch resp.StatusCode {
@@ -135,6 +161,35 @@ func (t *rateLimitedTransport) shouldRetry(resp *http.Response) bool {
 	}
 
 	return false
+}
+
+func (t *rateLimitedTransport) calculateRetryDelay(resp *http.Response) time.Duration {
+	if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+		if seconds, err := strconv.Atoi(retryAfter); err == nil {
+			baseDelay := time.Duration(seconds) * time.Second
+			return calculateRateLimitJitter(baseDelay)
+		}
+	}
+
+	if resetStr := resp.Header.Get("X-RateLimit-Reset"); resetStr != "" {
+		if resetTime, err := strconv.ParseInt(resetStr, 10, 64); err == nil {
+			delay := time.Until(time.Unix(resetTime, 0))
+			if delay > 0 {
+				// Add jitter to the reset time delay
+				return calculateRateLimitJitter(delay)
+			}
+		}
+	}
+
+	// Default delays with jitter based on status code
+	switch resp.StatusCode {
+	case http.StatusForbidden:
+		return calculateRateLimitJitter(120 * time.Second)
+	case http.StatusTooManyRequests:
+		return calculateRateLimitJitter(60 * time.Second)
+	default:
+		return calculateRateLimitJitter(30 * time.Second)
+	}
 }
 
 func (t *rateLimitedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -168,11 +223,16 @@ func (t *rateLimitedTransport) RoundTrip(req *http.Request) (*http.Response, err
 		// Make request
 		resp, err = t.base.RoundTrip(reqClone)
 		if err != nil {
-			delay := baseDelay * time.Duration(1<<uint(retryCount))
+			delay := calculateJitter(baseDelay, retryCount)
 			l.Debugf("Transport error: %v, retrying in %v", err, delay)
-			time.Sleep(delay)
-			retryCount++
-			continue
+
+			select {
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			case <-time.After(delay):
+				retryCount++
+				continue
+			}
 		}
 
 		shouldRetry := false
@@ -210,9 +270,9 @@ func (t *rateLimitedTransport) RoundTrip(req *http.Request) (*http.Response, err
 					strings.Contains(strings.ToLower(bodyStr), "abuse detection") ||
 					strings.Contains(strings.ToLower(bodyStr), "secondary rate") {
 					shouldRetry = true
-					retryDelay = 120 * time.Second * time.Duration(1<<uint(retryCount))
+					retryDelay = calculateJitter(120*time.Second, retryCount)
 					if retryDelay > 10*time.Minute {
-						retryDelay = 10 * time.Minute
+						retryDelay = calculateRateLimitJitter(10 * time.Minute)
 					}
 				}
 				// If not retrying, restore the body
@@ -241,32 +301,6 @@ func (t *rateLimitedTransport) RoundTrip(req *http.Request) (*http.Response, err
 	return nil, fmt.Errorf("max retries exceeded for request: %s", req.URL)
 }
 
-func (t *rateLimitedTransport) calculateRetryDelay(resp *http.Response) time.Duration {
-	if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
-		if seconds, err := strconv.Atoi(retryAfter); err == nil {
-			return time.Duration(seconds+5) * time.Second // Add 5s buffer
-		}
-	}
-
-	if resetStr := resp.Header.Get("X-RateLimit-Reset"); resetStr != "" {
-		if resetTime, err := strconv.ParseInt(resetStr, 10, 64); err == nil {
-			delay := time.Until(time.Unix(resetTime, 0))
-			if delay > 0 {
-				return delay + (30 * time.Second)
-			}
-		}
-	}
-
-	switch resp.StatusCode {
-	case http.StatusForbidden:
-		return 120 * time.Second
-	case http.StatusTooManyRequests:
-		return 60 * time.Second
-	default:
-		return 30 * time.Second
-	}
-}
-
 func (g *GitHubClient) withRetry(ctx context.Context, operation string, fn func() error) error {
 	l := log.WithFields(log.Fields{
 		"action": operation,
@@ -289,11 +323,7 @@ func (g *GitHubClient) withRetry(ctx context.Context, operation string, fn func(
 			strings.Contains(err.Error(), "abuse detection") ||
 			strings.Contains(err.Error(), "secondary rate") {
 
-			delay := baseDelay * time.Duration(1<<uint(attempt))
-			if delay > 10*time.Minute {
-				delay = 10 * time.Minute
-			}
-
+			delay := calculateJitter(baseDelay, attempt)
 			l.Debugf("Rate limit hit during %s, retrying in %v: %v", operation, delay, err)
 
 			select {

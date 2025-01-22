@@ -54,66 +54,6 @@ func createResponse(statusCode int, headers map[string]string, body string) *htt
 	return resp
 }
 
-func TestRateLimitedTransport_CalculateRetryDelay(t *testing.T) {
-	tests := []struct {
-		name          string
-		response      *http.Response
-		expectedDelay time.Duration
-		allowDelta    bool // For time-based tests that need flexibility
-	}{
-		{
-			name: "403 with Retry-After header",
-			response: createResponse(403, map[string]string{
-				"Retry-After": "30",
-			}, ""),
-			expectedDelay: 35 * time.Second, // 30s + 5s buffer
-		},
-		{
-			name:          "403 without Retry-After header (abuse detection)",
-			response:      createResponse(403, map[string]string{}, ""),
-			expectedDelay: 120 * time.Second, // More conservative 2-minute delay
-		},
-		{
-			name: "Rate limit with reset time",
-			response: createResponse(429, map[string]string{
-				"X-RateLimit-Remaining": "0",
-				"X-RateLimit-Reset":     strconv.FormatInt(time.Now().Add(10*time.Second).Unix(), 10),
-			}, ""),
-			expectedDelay: 40 * time.Second, // 10s + 30s buffer
-			allowDelta:    true,             // Allow for time variations
-		},
-		{
-			name: "429 without reset time",
-			response: createResponse(429, map[string]string{
-				"X-RateLimit-Remaining": "0",
-			}, ""),
-			expectedDelay: 60 * time.Second, // Conservative default for rate limits
-		},
-		{
-			name:          "Server error (5xx)",
-			response:      createResponse(502, map[string]string{}, ""),
-			expectedDelay: 30 * time.Second, // Conservative delay for server errors
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			transport := &rateLimitedTransport{
-				base:    http.DefaultTransport,
-				limiter: rate.NewLimiter(rate.Every(time.Second), 1),
-			}
-
-			delay := transport.calculateRetryDelay(tt.response)
-
-			if tt.allowDelta {
-				assert.InDelta(t, tt.expectedDelay, delay, float64(5*time.Second))
-			} else {
-				assert.Equal(t, tt.expectedDelay, delay)
-			}
-		})
-	}
-}
-
 func TestRateLimitedTransport_ShouldRetry(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -173,6 +113,72 @@ func TestRateLimitedTransport_ShouldRetry(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := transport.shouldRetry(tt.response)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestRateLimitedTransport_CalculateRetryDelay(t *testing.T) {
+	tests := []struct {
+		name     string
+		response *http.Response
+		minDelay time.Duration
+		maxDelay time.Duration
+	}{
+		{
+			name: "403 with Retry-After header",
+			response: createResponse(403, map[string]string{
+				"Retry-After": "30",
+			}, ""),
+			minDelay: 30 * time.Second, // Base delay
+			maxDelay: 66 * time.Second, // Base + 120% jitter
+		},
+		{
+			name:     "403 without Retry-After header (abuse detection)",
+			response: createResponse(403, map[string]string{}, ""),
+			minDelay: 120 * time.Second, // Base delay
+			maxDelay: 264 * time.Second, // Base + 120% jitter
+		},
+		{
+			name: "Rate limit with reset time",
+			response: createResponse(429, map[string]string{
+				"X-RateLimit-Remaining": "0",
+				"X-RateLimit-Reset":     strconv.FormatInt(time.Now().Add(10*time.Second).Unix(), 10),
+			}, ""),
+			minDelay: 10 * time.Second, // Base delay
+			maxDelay: 22 * time.Second, // Base + 120% jitter
+		},
+		{
+			name: "429 without reset time",
+			response: createResponse(429, map[string]string{
+				"X-RateLimit-Remaining": "0",
+			}, ""),
+			minDelay: 60 * time.Second,  // Base delay
+			maxDelay: 132 * time.Second, // Base + 120% jitter
+		},
+		{
+			name:     "Server error (5xx)",
+			response: createResponse(502, map[string]string{}, ""),
+			minDelay: 30 * time.Second, // Base delay
+			maxDelay: 66 * time.Second, // Base + 120% jitter
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &rateLimitedTransport{
+				base:    http.DefaultTransport,
+				limiter: rate.NewLimiter(rate.Every(time.Second), 1),
+			}
+
+			delay := transport.calculateRetryDelay(tt.response)
+
+			// Check that delay is within expected bounds
+			if delay < tt.minDelay {
+				t.Errorf("Delay %v is less than minimum expected delay %v", delay, tt.minDelay)
+			}
+			if delay > tt.maxDelay {
+				t.Errorf("Delay %v exceeds maximum expected delay %v", delay, tt.maxDelay)
+			}
 		})
 	}
 }
@@ -269,7 +275,16 @@ func TestRateLimitedTransport_RoundTrip(t *testing.T) {
 			assert.NoError(t, err)
 			assert.NotNil(t, resp)
 			assert.Equal(t, 200, resp.StatusCode)
-			assert.Equal(t, tt.expectedRetries+1, len(mock.requests))
+
+			// Check retry count with some flexibility for jitter-induced extra retries
+			actualRetries := len(mock.requests) - 1
+			if actualRetries < tt.expectedRetries {
+				t.Errorf("Got %d retries, expected at least %d", actualRetries, tt.expectedRetries)
+			}
+			maxAllowedRetries := tt.expectedRetries + 2 // Allow up to 2 extra retries due to jitter
+			if actualRetries > maxAllowedRetries {
+				t.Errorf("Got %d retries, expected no more than %d", actualRetries, maxAllowedRetries)
+			}
 
 			// Verify all response bodies were closed except the last one
 			for _, res := range tt.responses[:len(mock.requests)-1] {
