@@ -144,7 +144,7 @@ NotifLoop:
 		l.Debug("no webhooks to trigger")
 		return nil
 	}
-	workers := 10
+	workers := 100
 	jobs := make(chan slackJob, len(jobsToDo))
 	res := make(chan slackJob, len(jobsToDo))
 	if len(jobsToDo) < workers {

@@ -172,7 +172,7 @@ NotifLoop:
 		l.Debug("no webhooks to trigger")
 		return nil
 	}
-	workers := 10
+	workers := 100
 	jobs := make(chan emailJob, len(jobsToDo))
 	res := make(chan emailJob, len(jobsToDo))
 	if len(jobsToDo) < workers {

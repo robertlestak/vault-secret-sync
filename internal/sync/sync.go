@@ -88,7 +88,7 @@ func processSyncJobs(ctx context.Context, jobHolder []SyncJob) error {
 	defer l.Trace("end")
 	jobs := make(chan SyncJob, len(jobHolder))
 	errChan := make(chan error, len(jobHolder))
-	workers := 10
+	workers := 100
 	if len(jobHolder) < workers {
 		workers = len(jobHolder)
 	}
@@ -137,7 +137,7 @@ func handleSingleSync(sc *SyncClients, j SyncJob) error {
 	var errors []error
 	dest := make(chan SyncClient, len(sc.Dest))
 	errChan := make(chan error, len(sc.Dest))
-	workers := 10
+	workers := 100
 	if len(sc.Dest) < workers {
 		workers = len(sc.Dest)
 	}
@@ -187,7 +187,7 @@ func handleSingleDelete(sc *SyncClients, j SyncJob) error {
 	var errors []error
 	dest := make(chan SyncClient, len(sc.Dest))
 	errChan := make(chan error, len(sc.Dest))
-	workers := 10
+	workers := 100
 	if len(sc.Dest) < workers {
 		workers = len(sc.Dest)
 	}
