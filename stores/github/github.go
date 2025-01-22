@@ -169,7 +169,7 @@ func (t *rateLimitedTransport) RoundTrip(req *http.Request) (*http.Response, err
 		resp, err = t.base.RoundTrip(reqClone)
 		if err != nil {
 			delay := baseDelay * time.Duration(1<<uint(retryCount))
-			l.Warnf("Transport error: %v, retrying in %v", err, delay)
+			l.Debugf("Transport error: %v, retrying in %v", err, delay)
 			time.Sleep(delay)
 			retryCount++
 			continue
@@ -294,7 +294,7 @@ func (g *GitHubClient) withRetry(ctx context.Context, operation string, fn func(
 				delay = 10 * time.Minute
 			}
 
-			l.Warnf("Rate limit hit during %s, retrying in %v: %v", operation, delay, err)
+			l.Debugf("Rate limit hit during %s, retrying in %v: %v", operation, delay, err)
 
 			select {
 			case <-ctx.Done():
