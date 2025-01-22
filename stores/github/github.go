@@ -1,11 +1,13 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -168,7 +170,7 @@ func (t *rateLimitedTransport) calculateRetryDelay(resp *http.Response) time.Dur
 }
 
 func (t *rateLimitedTransport) shouldRetry(resp *http.Response) bool {
-	// Expanded retry conditions
+	// Check status codes first
 	switch resp.StatusCode {
 	case http.StatusTooManyRequests, // 429
 		http.StatusForbidden,          // 403
@@ -178,10 +180,28 @@ func (t *rateLimitedTransport) shouldRetry(resp *http.Response) bool {
 		return true
 	}
 
-	// Also retry if we're running low on remaining rate limit
-	if remaining := resp.Header.Get("X-RateLimit-Remaining"); remaining != "" {
-		if rem, err := strconv.Atoi(remaining); err == nil && rem < 10 {
-			return true // Preemptively retry if we're getting close to the limit
+	// Check rate limit headers
+	remaining := resp.Header.Get("X-RateLimit-Remaining")
+	if remaining != "" {
+		if rem, err := strconv.Atoi(remaining); err == nil {
+			// Pre-emptively back off if we're getting close to the limit
+			if rem < 10 {
+				return true
+			}
+		}
+	}
+
+	// Check for secondary rate limit indicators in response body
+	if resp.StatusCode == http.StatusForbidden {
+		body, err := io.ReadAll(resp.Body)
+		if err == nil {
+			resp.Body.Close()
+			// Recreate the body for subsequent reads
+			resp.Body = io.NopCloser(bytes.NewBuffer(body))
+			bodyStr := string(body)
+
+			return strings.Contains(strings.ToLower(bodyStr), "secondary rate limit") ||
+				strings.Contains(strings.ToLower(bodyStr), "abuse detection")
 		}
 	}
 
