@@ -267,11 +267,56 @@ func (t *rateLimitedTransport) calculateRetryDelay(resp *http.Response) time.Dur
 	}
 }
 
+func (g *GitHubClient) withRetry(ctx context.Context, operation string, fn func() error) error {
+	l := log.WithFields(log.Fields{
+		"action": operation,
+	})
+
+	maxRetries := 100
+	baseDelay := time.Second * 10
+
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+
+		// Check if the error is rate limit related
+		if strings.Contains(err.Error(), "rate limit") ||
+			strings.Contains(err.Error(), "abuse detection") ||
+			strings.Contains(err.Error(), "secondary rate") {
+
+			delay := baseDelay * time.Duration(1<<uint(attempt))
+			if delay > 10*time.Minute {
+				delay = 10 * time.Minute
+			}
+
+			l.Warnf("Rate limit hit during %s, retrying in %v: %v", operation, delay, err)
+
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("context cancelled while retrying %s: %w", operation, ctx.Err())
+			case <-time.After(delay):
+				continue
+			}
+		}
+
+		// If it's not a rate limit error, return immediately
+		return err
+	}
+
+	return fmt.Errorf("max retries exceeded for %s: %w", operation, lastErr)
+}
+
 func (g *GitHubClient) CreateClient(ctx context.Context) error {
 	l := log.WithFields(log.Fields{
 		"action": "CreateClient",
 	})
 	l.Trace("start")
+
 	if g.PrivateKeyString == "" && g.PrivateKeyPath == "" {
 		return errors.New("privateKey or privateKeyPath is required")
 	}
@@ -287,11 +332,16 @@ func (g *GitHubClient) CreateClient(ctx context.Context) error {
 		}
 	}
 
-	appTokenSource, err := githubauth.NewApplicationTokenSource(int64(g.AppId), privateKey)
-	if err != nil {
-		l.Error(err)
+	var appTokenSource oauth2.TokenSource
+	err := g.withRetry(ctx, "CreateApplicationTokenSource", func() error {
+		var err error
+		appTokenSource, err = githubauth.NewApplicationTokenSource(int64(g.AppId), privateKey)
 		return err
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create application token source: %w", err)
 	}
+
 	installationTokenSource := githubauth.NewInstallationTokenSource(int64(g.installId()), appTokenSource)
 
 	limiter := rate.NewLimiter(rate.Every(2*time.Second), 1)
@@ -314,11 +364,16 @@ func (g *GitHubClient) CreateClient(ctx context.Context) error {
 }
 
 func (g *GitHubClient) RepoID(ctx context.Context) (int64, error) {
-	r, _, err := g.client.Repositories.Get(ctx, g.Owner, g.Repo)
+	var repo *github.Repository
+	err := g.withRetry(ctx, "RepoID", func() error {
+		var err error
+		repo, _, err = g.client.Repositories.Get(ctx, g.Owner, g.Repo)
+		return err
+	})
 	if err != nil {
 		return 0, err
 	}
-	return r.GetID(), nil
+	return repo.GetID(), nil
 }
 
 func (vc *GitHubClient) Meta() map[string]any {
@@ -358,6 +413,7 @@ func (g *GitHubClient) GetPath() string {
 func (g *GitHubClient) GetSecret(ctx context.Context, p string) ([]byte, error) {
 	return nil, errors.New("not implemented")
 }
+
 func (g *GitHubClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, path string, bSecrets []byte) ([]byte, error) {
 	l := log.WithFields(log.Fields{
 		"action": "WriteSecret",
@@ -366,14 +422,17 @@ func (g *GitHubClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 	})
 	l.Trace("start")
 	defer l.Trace("end")
+
 	if g.Merge != nil && !*g.Merge {
 		// first, clear out the existing secrets
 		g.DeleteSecret(ctx, "")
 	}
+
 	secrets := make(map[string]interface{})
 	if err := json.Unmarshal(bSecrets, &secrets); err != nil {
 		return nil, err
 	}
+
 	writeErrs := make(map[string]error)
 	// create secret(s) in repo for each key/value pair
 	for k, v := range secrets {
@@ -387,42 +446,34 @@ func (g *GitHubClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 			writeErrs[k] = err
 			continue
 		}
-		if g.Org {
-			esecret.Visibility = "all"
-			_, err = g.client.Actions.CreateOrUpdateOrgSecret(ctx, g.Owner, esecret)
-			if err != nil {
-				writeErrs[k] = err
-				continue
-			}
-		} else if g.Env != "" {
-			rid, err := g.RepoID(ctx)
-			if err != nil {
-				writeErrs[k] = err
-				continue
-			}
-			_, err = g.client.Actions.CreateOrUpdateEnvSecret(ctx, int(rid), g.Env, esecret)
-			if err != nil {
-				// if the error contains "404 Not Found", then the environment does not exist
-				if strings.Contains(err.Error(), "404 Not Found") {
-					writeErrs[k] = fmt.Errorf("environment %s does not exist", g.Env)
-				} else {
-					writeErrs[k] = err
+
+		err = g.withRetry(ctx, fmt.Sprintf("WriteSecret-%s", k), func() error {
+			var err error
+			if g.Org {
+				esecret.Visibility = "all"
+				_, err = g.client.Actions.CreateOrUpdateOrgSecret(ctx, g.Owner, esecret)
+			} else if g.Env != "" {
+				rid, err := g.RepoID(ctx)
+				if err != nil {
+					return err
 				}
-				continue
-			}
-		} else {
-			_, err = g.client.Actions.CreateOrUpdateRepoSecret(ctx, g.Owner, g.Repo, esecret)
-			if err != nil {
-				// if the error contains "404 Not Found", then the repo does not exist
-				if strings.Contains(err.Error(), "404 Not Found") {
-					writeErrs[k] = fmt.Errorf("repo %s does not exist", g.Repo)
-				} else {
-					writeErrs[k] = err
+				_, err = g.client.Actions.CreateOrUpdateEnvSecret(ctx, int(rid), g.Env, esecret)
+				if err != nil && strings.Contains(err.Error(), "404 Not Found") {
+					return fmt.Errorf("environment %s does not exist", g.Env)
 				}
-				continue
+			} else {
+				_, err = g.client.Actions.CreateOrUpdateRepoSecret(ctx, g.Owner, g.Repo, esecret)
+				if err != nil && strings.Contains(err.Error(), "404 Not Found") {
+					return fmt.Errorf("repo %s does not exist", g.Repo)
+				}
 			}
+			return err
+		})
+		if err != nil {
+			writeErrs[k] = err
 		}
 	}
+
 	if len(writeErrs) > 0 {
 		return nil, fmt.Errorf("error writing secrets: %v", writeErrs)
 	}
@@ -437,40 +488,41 @@ func (g *GitHubClient) DeleteSecret(ctx context.Context, secret string) error {
 	})
 	l.Trace("start")
 	defer l.Trace("end")
-	// delete repo secret
+
 	secretList, err := g.ListSecrets(ctx, "")
 	if err != nil {
 		return err
 	}
+
 	for _, s := range secretList {
-		if g.Org {
-			if _, err := g.client.Actions.DeleteOrgSecret(ctx, g.Owner, s); err != nil {
-				return err
-			}
-		} else if g.Env != "" {
-			rid, err := g.RepoID(ctx)
-			if err != nil {
-				return err
-			}
-			if _, err := g.client.Actions.DeleteEnvSecret(ctx, int(rid), g.Env, s); err != nil {
-				if strings.Contains(err.Error(), "404 Not Found") {
+		err = g.withRetry(ctx, fmt.Sprintf("DeleteSecret-%s", s), func() error {
+			var err error
+			if g.Org {
+				_, err = g.client.Actions.DeleteOrgSecret(ctx, g.Owner, s)
+			} else if g.Env != "" {
+				rid, err := g.RepoID(ctx)
+				if err != nil {
+					return err
+				}
+				_, err = g.client.Actions.DeleteEnvSecret(ctx, int(rid), g.Env, s)
+				if err != nil && strings.Contains(err.Error(), "404 Not Found") {
 					return fmt.Errorf("environment %s does not exist", g.Env)
-				} else {
-					return err
 				}
-			}
-		} else {
-			if _, err := g.client.Actions.DeleteRepoSecret(ctx, g.Owner, g.Repo, s); err != nil {
-				if strings.Contains(err.Error(), "404 Not Found") {
+			} else {
+				_, err = g.client.Actions.DeleteRepoSecret(ctx, g.Owner, g.Repo, s)
+				if err != nil && strings.Contains(err.Error(), "404 Not Found") {
 					return fmt.Errorf("repo %s does not exist", g.Repo)
-				} else {
-					return err
 				}
 			}
+			return err
+		})
+		if err != nil {
+			return err
 		}
 	}
 	return nil
 }
+
 func (g *GitHubClient) ListSecrets(ctx context.Context, p string) ([]string, error) {
 	l := log.WithFields(log.Fields{
 		"action": "ListSecrets",
@@ -478,81 +530,105 @@ func (g *GitHubClient) ListSecrets(ctx context.Context, p string) ([]string, err
 	})
 	l.Trace("start")
 	defer l.Trace("end")
-	// list repo secrets
+
 	var secretsList []string
 	opt := &github.ListOptions{}
+
 	for {
 		var secrets *github.Secrets
-		var err error
-		var resp *github.Response
-		if g.Org {
-			secrets, resp, err = g.client.Actions.ListOrgSecrets(ctx, g.Owner, opt)
-			if err != nil {
-				return nil, err
+		err := g.withRetry(ctx, "ListSecrets", func() error {
+			var err error
+			var resp *github.Response
+
+			if g.Org {
+				secrets, resp, err = g.client.Actions.ListOrgSecrets(ctx, g.Owner, opt)
+			} else if g.Env != "" {
+				rid, err := g.RepoID(ctx)
+				if err != nil {
+					return err
+				}
+				secrets, resp, err = g.client.Actions.ListEnvSecrets(ctx, int(rid), g.Env, opt)
+			} else {
+				secrets, resp, err = g.client.Actions.ListRepoSecrets(ctx, g.Owner, g.Repo, opt)
 			}
-		} else if g.Env != "" {
-			rid, err := g.RepoID(ctx)
 			if err != nil {
-				return nil, err
+				return err
 			}
-			secrets, resp, err = g.client.Actions.ListEnvSecrets(ctx, int(rid), g.Env, opt)
-			if err != nil {
-				return nil, err
+
+			for _, s := range secrets.Secrets {
+				secretsList = append(secretsList, s.Name)
 			}
-		} else {
-			secrets, resp, err = g.client.Actions.ListRepoSecrets(ctx, g.Owner, g.Repo, opt)
-			if err != nil {
-				return nil, err
+
+			if resp.NextPage == 0 {
+				opt.Page = 0 // Signal to break the outer loop
+			} else {
+				opt.Page = resp.NextPage
 			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
 		}
-		for _, s := range secrets.Secrets {
-			secretsList = append(secretsList, s.Name)
-		}
-		if resp.NextPage == 0 {
+
+		if opt.Page == 0 {
 			break
 		}
-		opt.Page = resp.NextPage
 	}
 	return secretsList, nil
 }
 
 func (g *GitHubClient) GetOrgPublicKey(ctx context.Context) (*github.PublicKey, error) {
-	// get org public key
-	k, _, err := g.client.Actions.GetOrgPublicKey(ctx, g.Owner)
-	if err != nil {
-		return nil, fmt.Errorf("error getting org public key %s: %w", g.Owner, err)
-	}
-	return k, nil
+	var pubKey *github.PublicKey
+	err := g.withRetry(ctx, "GetOrgPublicKey", func() error {
+		var err error
+		pubKey, _, err = g.client.Actions.GetOrgPublicKey(ctx, g.Owner)
+		if err != nil {
+			return fmt.Errorf("error getting org public key %s: %w", g.Owner, err)
+		}
+		return nil
+	})
+	return pubKey, err
 }
 
 func (g *GitHubClient) GetEnvPublicKey(ctx context.Context) (*github.PublicKey, error) {
-	// get env public key
 	rid, err := g.RepoID(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("error getting repo ID %s: %w", g.Repo, err)
 	}
-	k, _, err := g.client.Actions.GetEnvPublicKey(ctx, int(rid), g.Env)
-	if err != nil {
-		return nil, fmt.Errorf("error getting env public key %s %s: %w", g.Repo, g.Env, err)
-	}
-	return k, nil
+
+	var pubKey *github.PublicKey
+	err = g.withRetry(ctx, "GetEnvPublicKey", func() error {
+		var err error
+		pubKey, _, err = g.client.Actions.GetEnvPublicKey(ctx, int(rid), g.Env)
+		if err != nil {
+			return fmt.Errorf("error getting env public key %s %s: %w", g.Repo, g.Env, err)
+		}
+		return nil
+	})
+	return pubKey, err
 }
 
 func (g *GitHubClient) GetRepoPublicKey(ctx context.Context) (*github.PublicKey, error) {
-	// get repo public key
-	k, _, err := g.client.Actions.GetRepoPublicKey(ctx, g.Owner, g.Repo)
-	if err != nil {
-		return nil, fmt.Errorf("error getting repo public key %s %s: %w", g.Owner, g.Repo, err)
-	}
-	return k, nil
+	var pubKey *github.PublicKey
+	err := g.withRetry(ctx, "GetRepoPublicKey", func() error {
+		var err error
+		pubKey, _, err = g.client.Actions.GetRepoPublicKey(ctx, g.Owner, g.Repo)
+		if err != nil {
+			return fmt.Errorf("error getting repo public key %s %s: %w", g.Owner, g.Repo, err)
+		}
+		return nil
+	})
+	return pubKey, err
 }
 
 func (g *GitHubClient) EncryptSecret(ctx context.Context, name, plainText string) (*github.EncryptedSecret, error) {
 	es := &github.EncryptedSecret{
 		Name: name,
 	}
+
 	var pubKey *github.PublicKey
 	var err error
+
 	if g.Org {
 		pubKey, err = g.GetOrgPublicKey(ctx)
 	} else if g.Env != "" {
@@ -563,6 +639,7 @@ func (g *GitHubClient) EncryptSecret(ctx context.Context, name, plainText string
 	if err != nil {
 		return nil, err
 	}
+
 	es.KeyID = pubKey.GetKeyID()
 	if es.KeyID == "" {
 		return nil, errors.New("public key ID is empty")
@@ -570,14 +647,17 @@ func (g *GitHubClient) EncryptSecret(ctx context.Context, name, plainText string
 	if plainText == "" {
 		return nil, errors.New("plainText is empty")
 	}
+
 	keyDec, err := base64.StdEncoding.DecodeString(pubKey.GetKey())
 	if err != nil {
 		return nil, err
 	}
+
 	d, serr := cryptobox.CryptoBoxSeal([]byte(plainText), []byte(keyDec))
 	if serr != 0 {
 		return nil, fmt.Errorf("error encrypting secret: %d", serr)
 	}
+
 	es.EncryptedValue = base64.StdEncoding.EncodeToString(d)
 	return es, nil
 }
