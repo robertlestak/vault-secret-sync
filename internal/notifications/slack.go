@@ -132,6 +132,8 @@ NotifLoop:
 			if o != message.Event {
 				l.Debugf("skipping Slack notification: %v", slack)
 				continue EventLoop
+			} else {
+				break EventLoop
 			}
 		}
 		l.Debugf("adding Slack notification: %v", slack)

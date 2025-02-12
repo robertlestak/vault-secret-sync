@@ -20,7 +20,7 @@ func Trigger(ctx context.Context, message v1alpha1.NotificationMessage) error {
 	})
 	l.Trace("start")
 	defer l.Trace("end")
-	if message.VaultSecretSync.Spec.Notifications == nil || len(message.VaultSecretSync.Spec.Notifications) == 0 {
+	if len(message.VaultSecretSync.Spec.Notifications) == 0 {
 		l.Debug("no notifications configured")
 		return nil
 	}

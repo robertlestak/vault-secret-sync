@@ -137,6 +137,8 @@ NotifLoop:
 			if o != message.Event {
 				l.Debugf("skipping webhook notification: %v", webhook)
 				continue EventLoop
+			} else {
+				break EventLoop
 			}
 		}
 		if webhook.Webhook != nil {

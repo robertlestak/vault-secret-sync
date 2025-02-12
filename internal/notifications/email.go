@@ -160,6 +160,8 @@ NotifLoop:
 			if o != message.Event {
 				l.Debugf("skipping email notification: %v != %v", o, message.Event)
 				continue EventLoop
+			} else {
+				break EventLoop
 			}
 		}
 		l.Debugf("adding email notification: %v", email)
