@@ -155,14 +155,18 @@ NotifLoop:
 			l.Debugf("skipping email notification: %v", email)
 			continue NotifLoop
 		}
-	EventLoop:
-		for _, o := range email.Email.Events {
-			if o != message.Event {
-				l.Debugf("skipping email notification: %v != %v", o, message.Event)
-				continue EventLoop
-			} else {
-				break EventLoop
+		eventMatch := false
+		for _, configuredEvent := range email.Email.Events {
+			if configuredEvent == message.Event {
+				eventMatch = true
+				break
 			}
+		}
+
+		// Skip this notification if event doesn't match
+		if !eventMatch {
+			l.Debugf("skipping email notification for non-matching event: %v", message.Event)
+			continue NotifLoop
 		}
 		l.Debugf("adding email notification: %v", email)
 		jobsToDo = append(jobsToDo, emailJob{

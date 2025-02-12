@@ -127,14 +127,18 @@ NotifLoop:
 			l.Debugf("skipping Slack notification: %v", slack)
 			continue NotifLoop
 		}
-	EventLoop:
-		for _, o := range slack.Slack.Events {
-			if o != message.Event {
-				l.Debugf("skipping Slack notification: %v", slack)
-				continue EventLoop
-			} else {
-				break EventLoop
+		eventMatch := false
+		for _, configuredEvent := range slack.Slack.Events {
+			if configuredEvent == message.Event {
+				eventMatch = true
+				break
 			}
+		}
+
+		// Skip this notification if event doesn't match
+		if !eventMatch {
+			l.Debugf("skipping email notification for non-matching event: %v", message.Event)
+			continue NotifLoop
 		}
 		l.Debugf("adding Slack notification: %v", slack)
 		jobsToDo = append(jobsToDo, slackJob{

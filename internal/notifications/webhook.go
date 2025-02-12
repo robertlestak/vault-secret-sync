@@ -132,14 +132,18 @@ NotifLoop:
 			l.Debugf("skipping webhook notification: %v", webhook)
 			continue NotifLoop
 		}
-	EventLoop:
-		for _, o := range webhook.Webhook.Events {
-			if o != message.Event {
-				l.Debugf("skipping webhook notification: %v", webhook)
-				continue EventLoop
-			} else {
-				break EventLoop
+		eventMatch := false
+		for _, configuredEvent := range webhook.Webhook.Events {
+			if configuredEvent == message.Event {
+				eventMatch = true
+				break
 			}
+		}
+
+		// Skip this notification if event doesn't match
+		if !eventMatch {
+			l.Debugf("skipping email notification for non-matching event: %v", message.Event)
+			continue NotifLoop
 		}
 		if webhook.Webhook != nil {
 			l.Debugf("adding webhook notification: %v", webhook)
