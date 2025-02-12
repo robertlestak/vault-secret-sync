@@ -213,6 +213,9 @@ func (t *rateLimitedTransport) RoundTrip(req *http.Request) (*http.Response, err
 		// Clone request
 		reqClone := req.Clone(req.Context())
 		if req.Body != nil {
+			if req.GetBody == nil {
+				return nil, errors.New("request body is not rewindable")
+			}
 			body, err := req.GetBody()
 			if err != nil {
 				return nil, fmt.Errorf("failed to get request body: %w", err)
@@ -311,6 +314,9 @@ func (g *GitHubClient) withRetry(ctx context.Context, operation string, fn func(
 
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
+		if fn == nil {
+			return errors.New("nil function")
+		}
 		err := fn()
 		if err == nil {
 			return nil
@@ -452,6 +458,9 @@ func (g *GitHubClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 	})
 	l.Trace("start")
 	defer l.Trace("end")
+	if g == nil {
+		return nil, errors.New("nil client")
+	}
 
 	if g.Merge != nil && !*g.Merge {
 		// first, clear out the existing secrets
@@ -578,8 +587,14 @@ func (g *GitHubClient) ListSecrets(ctx context.Context, p string) ([]string, err
 					return err
 				}
 				secrets, resp, err = g.client.Actions.ListEnvSecrets(ctx, int(rid), g.Env, opt)
+				if err != nil && strings.Contains(err.Error(), "404 Not Found") {
+					return fmt.Errorf("environment %s does not exist", g.Env)
+				}
 			} else {
 				secrets, resp, err = g.client.Actions.ListRepoSecrets(ctx, g.Owner, g.Repo, opt)
+				if err != nil && strings.Contains(err.Error(), "404 Not Found") {
+					return fmt.Errorf("repo %s does not exist", g.Repo)
+				}
 			}
 			if err != nil {
 				return err
