@@ -103,6 +103,7 @@ spec:
             "{{ .Key }}": "{{ .Value }}"
           }
         }
+  notificationsTemplate: "default/notification-template/notification.yaml" # optional, default empty. Set to the path of the ConfigMap containing the notification template
   notifications:
   - email:
       events: ["success", "failure"]
@@ -354,6 +355,53 @@ Notifications can be configured to send a message to a configured receiver when 
 ```
 
 For the `email` notification, be sure to set `notifications.email` values in your config with your SMTP server information. Remember that you can use environment variables for sensitive information, eg `VSS_NOTIFICATIONS_EMAIL_PASSWORD=foobar`.
+
+#### Notifications Template
+
+By default, notifications are defined inline on the spec as outlined above. However there may be cases where you would like to re-use a common notification config across multiple syncs without having to duplicate code.
+
+For this, you can use the `notificationsTemplate` field, which accepts a `string` defining a `ConfigMap` which contains the YAML `notifications` spec.
+
+The field is in the format:
+
+```yaml
+notificationsTemplate: "<namespace>/<configmap-name>/<key>"
+```
+
+If `namespace` is excluded, the current namespace will be used.
+
+```yaml
+notificationsTemplate: "<configmap-name>/<key>"
+```
+
+The `ConfigMap` should be in the format:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: "notification-template"
+  namespace: "default"
+data:
+  notification.yaml: |
+    - email:
+        events: ["success", "failure"]
+        to: "example@example.com"
+        from: "example@example.com"
+        subject: "VaultSecretSync Notification - {{ .Event }}"
+        body: |
+          The sync operation has completed with status: {{ .Event }}.
+          Details:
+          Name: {{ .VaultSecretSync.Name }}
+          Source: {{ .VaultSecretSync.Spec.Source.Address }}
+          Destination: {{ .VaultSecretSync.Spec.Dest | json }}
+```
+
+For the above, you would set:
+
+```yaml
+notificationsTemplate: "default/notification-template/notification.yaml"
+```
 
 ## Dry Run
 

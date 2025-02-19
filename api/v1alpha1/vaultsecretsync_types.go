@@ -120,14 +120,15 @@ type NotificationSpec struct {
 
 // VaultSecretSyncSpec defines the desired state of VaultSecretSync
 type VaultSecretSyncSpec struct {
-	Source        *vault.VaultClient  `yaml:"source" json:"source"`
-	Dest          []*StoreConfig      `yaml:"dest" json:"dest"`
-	SyncDelete    *bool               `yaml:"syncDelete,omitempty" json:"syncDelete,omitempty"`
-	DryRun        *bool               `yaml:"dryRun,omitempty" json:"dryRun,omitempty"`
-	Suspend       *bool               `yaml:"suspend,omitempty" json:"suspend,omitempty"`
-	Filters       *FilterConfig       `yaml:"filters,omitempty" json:"filters,omitempty"`
-	Transforms    *TransformSpec      `json:"transforms,omitempty"`
-	Notifications []*NotificationSpec `json:"notifications,omitempty"`
+	Source                *vault.VaultClient  `yaml:"source" json:"source"`
+	Dest                  []*StoreConfig      `yaml:"dest" json:"dest"`
+	SyncDelete            *bool               `yaml:"syncDelete,omitempty" json:"syncDelete,omitempty"`
+	DryRun                *bool               `yaml:"dryRun,omitempty" json:"dryRun,omitempty"`
+	Suspend               *bool               `yaml:"suspend,omitempty" json:"suspend,omitempty"`
+	Filters               *FilterConfig       `yaml:"filters,omitempty" json:"filters,omitempty"`
+	Transforms            *TransformSpec      `json:"transforms,omitempty"`
+	Notifications         []*NotificationSpec `json:"notifications,omitempty"`
+	NotificationsTemplate *string             `json:"notificationsTemplate,omitempty"`
 }
 
 // +kubebuilder:object:generate=true
