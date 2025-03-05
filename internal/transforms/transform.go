@@ -3,6 +3,7 @@ package transforms
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"text/template"
@@ -25,7 +26,7 @@ func ExecuteTransformTemplate(sc v1alpha1.VaultSecretSync, secret []byte) ([]byt
 		},
 		"string": func(v interface{}) string {
 			// Convert the value to a string
-			return v.(string)
+			return fmt.Sprintf("%v", v)
 		},
 		"int": func(v interface{}) int {
 			// Convert the value to an int
