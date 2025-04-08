@@ -267,6 +267,9 @@ func (vc *VaultClient) GetKVSecretOnce(ctx context.Context, s string) (map[strin
 		return nil, errors.New("secret not found: " + s)
 	}
 	l.Tracef("secret=%+v", secret)
+	if secret.Data["data"] == nil {
+		return nil, errors.New("secret data not found: " + s)
+	}
 	return secret.Data["data"].(map[string]interface{}), nil
 }
 
