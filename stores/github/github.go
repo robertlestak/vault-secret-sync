@@ -480,7 +480,7 @@ func (g *GitHubClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 			l.Debugf("skipping empty secret: %s", k)
 			continue
 		}
-		esecret, err := g.EncryptSecret(ctx, k, v.(string))
+		esecret, err := g.EncryptSecret(ctx, k, fmt.Sprintf("%v", v))
 		if err != nil {
 			writeErrs[k] = err
 			continue
