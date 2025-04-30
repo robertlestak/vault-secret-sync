@@ -334,13 +334,13 @@ func (vc *VaultClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 	if terr != nil {
 		return nil, terr
 	}
-	secrets, err = vc.WriteSecretOnce(ctx, s, data)
+	secrets, err = vc.WriteSecretWithLatestCAS(ctx, s, data)
 	if err != nil {
 		terr := vc.NewToken(ctx)
 		if terr != nil {
 			return nil, terr
 		}
-		secrets, err = vc.WriteSecretOnce(ctx, s, data)
+		secrets, err = vc.WriteSecretWithLatestCAS(ctx, s, data)
 		if err != nil {
 			return nil, err
 		}
@@ -350,7 +350,7 @@ func (vc *VaultClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 }
 
 // WriteSecret writes a secret to Vault VaultClient at path p with secret value s
-func (vc *VaultClient) WriteSecretOnce(ctx context.Context, p string, s map[string]interface{}) (map[string]interface{}, error) {
+func (vc *VaultClient) WriteSecretOnce(ctx context.Context, p string, s map[string]interface{}, cas *int) (map[string]interface{}, error) {
 	var secrets map[string]interface{}
 	pp := strings.Split(p, "/")
 	if len(pp) < 2 {
@@ -364,14 +364,71 @@ func (vc *VaultClient) WriteSecretOnce(ctx context.Context, p string, s map[stri
 	if p == "" {
 		return secrets, errors.New("secret path required")
 	}
+
+	// Prepare the data payload
 	vd := map[string]interface{}{
 		"data": s,
 	}
+
+	// Add CAS parameter if provided
+	if cas != nil {
+		vd["options"] = map[string]interface{}{
+			"cas": *cas,
+		}
+	}
+
 	_, err := vc.Client.Logical().WriteWithContext(ctx, p, vd)
 	if err != nil {
 		return secrets, err
 	}
 	return secrets, nil
+}
+
+func (vc *VaultClient) WriteSecretWithLatestCAS(ctx context.Context, p string, s map[string]interface{}) (map[string]interface{}, error) {
+	var secrets map[string]interface{}
+	originalPath := p
+
+	// Validate path
+	pp := strings.Split(p, "/")
+	if len(pp) < 2 {
+		return secrets, errors.New("secret path must be in kv/path/to/secret format")
+	}
+
+	// Get the current version from metadata
+	metadataPath := make([]string, len(pp))
+	copy(metadataPath, pp)
+	metadataPath = insertSliceString(metadataPath, 1, "metadata")
+	metadataPathStr := strings.Join(metadataPath, "/")
+
+	metadata, err := vc.Client.Logical().ReadWithContext(ctx, metadataPathStr)
+
+	// Prepare the cas value
+	var cas *int = nil
+
+	// If metadata exists and has a current_version field
+	if err == nil && metadata != nil && metadata.Data != nil {
+		if cv, ok := metadata.Data["current_version"]; ok {
+			// Handle different possible types
+			switch v := cv.(type) {
+			case json.Number:
+				if intVal, err := v.Int64(); err == nil {
+					intCas := int(intVal)
+					cas = &intCas
+				}
+			case float64:
+				intCas := int(v)
+				cas = &intCas
+			case int:
+				cas = &v
+			case int64:
+				intCas := int(v)
+				cas = &intCas
+			}
+		}
+	}
+
+	// Use the WriteSecretOnce function with the cas value
+	return vc.WriteSecretOnce(ctx, originalPath, s, cas)
 }
 
 // DeleteSecret deletes a secret from path p
