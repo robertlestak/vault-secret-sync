@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/robertlestak/vault-secret-sync/pkg/driver"
 	log "github.com/sirupsen/logrus"
@@ -301,7 +302,7 @@ func (vc *VaultClient) GetSecret(ctx context.Context, s string) ([]byte, error) 
 }
 
 // WriteSecret will login and retry secret write on failure
-// to gracefully handle token expiration
+// to gracefully handle token expiration and CAS conflicts
 func (vc *VaultClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, s string, bData []byte) ([]byte, error) {
 	l := log.WithFields(log.Fields{
 		"address": vc.Address,
@@ -309,44 +310,86 @@ func (vc *VaultClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 		"path":    s,
 		"method":  vc.AuthMethod,
 	})
-	var data map[string]interface{}
-	err := json.Unmarshal(bData, &data)
+	
+	var newData map[string]interface{}
+	err := json.Unmarshal(bData, &newData)
 	if err != nil {
 		return nil, err
 	}
-	var secrets map[string]interface{}
-	if vc.Merge {
-		sec, err := vc.GetSecret(ctx, s)
-		if err != nil {
-			return nil, err
-		}
-		var secd map[string]interface{}
-		err = json.Unmarshal(sec, &secd)
-		if err != nil {
-			return nil, err
-		}
-		for k, v := range data {
-			secd[k] = v
-		}
-		data = secd
-	}
+
 	terr := vc.NewToken(ctx)
 	if terr != nil {
 		return nil, terr
 	}
-	secrets, err = vc.WriteSecretWithLatestCAS(ctx, s, data)
-	if err != nil {
-		terr := vc.NewToken(ctx)
-		if terr != nil {
-			return nil, terr
+
+	// Retry loop for CAS conflicts with exponential backoff
+	// No max retries - CAS conflicts are transient and will eventually succeed
+	maxBackoff := 5 * time.Second
+	attempt := 0
+	for {
+		if attempt > 0 {
+			backoff := time.Duration(100*(1<<uint(attempt-1))) * time.Millisecond
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			l.WithFields(log.Fields{
+				"attempt": attempt,
+				"backoff": backoff,
+			}).Debug("retrying write after CAS conflict")
+			time.Sleep(backoff)
 		}
-		secrets, err = vc.WriteSecretWithLatestCAS(ctx, s, data)
+
+		// Get current version and data
+		currentVersion, currentData, err := vc.getSecretWithVersion(ctx, s)
+		if err != nil && !strings.Contains(err.Error(), "secret not found") {
+			// Real error reading secret - fail immediately
+			return nil, fmt.Errorf("failed to read secret: %w", err)
+		}
+
+		// Prepare data to write
+		dataToWrite := newData
+		if vc.Merge && currentData != nil {
+			dataToWrite = make(map[string]interface{})
+			for k, v := range currentData {
+				dataToWrite[k] = v
+			}
+			for k, v := range newData {
+				dataToWrite[k] = v
+			}
+		}
+
+		// Attempt write with CAS
+		_, err = vc.WriteSecretOnce(ctx, s, dataToWrite, currentVersion)
 		if err != nil {
-			return nil, err
+			if strings.Contains(err.Error(), "check-and-set parameter did not match") ||
+				strings.Contains(err.Error(), "cas parameter did not match") {
+				l.WithFields(log.Fields{
+					"attempt":      attempt,
+					"expected_cas": currentVersion,
+				}).Warn("CAS conflict detected, retrying")
+				
+				attempt++
+				continue
+			}
+			
+			if attempt == 0 {
+				terr := vc.NewToken(ctx)
+				if terr != nil {
+					return nil, terr
+				}
+				attempt++
+				continue
+			}
+			
+			return nil, fmt.Errorf("failed to write secret: %w", err)
 		}
+
+		l.WithFields(log.Fields{
+			"attempt": attempt,
+			"cas":     currentVersion,
+		}).Debug("successfully wrote secret")
+		return nil, nil
 	}
-	l.Tracef("secrets=%+v", secrets)
-	return nil, err
 }
 
 // WriteSecret writes a secret to Vault VaultClient at path p with secret value s
@@ -384,51 +427,67 @@ func (vc *VaultClient) WriteSecretOnce(ctx context.Context, p string, s map[stri
 	return secrets, nil
 }
 
-func (vc *VaultClient) WriteSecretWithLatestCAS(ctx context.Context, p string, s map[string]interface{}) (map[string]interface{}, error) {
-	var secrets map[string]interface{}
-	originalPath := p
-
-	// Validate path
-	pp := strings.Split(p, "/")
-	if len(pp) < 2 {
-		return secrets, errors.New("secret path must be in kv/path/to/secret format")
+// getSecretWithVersion retrieves both the secret data and current version
+func (vc *VaultClient) getSecretWithVersion(ctx context.Context, s string) (*int, map[string]interface{}, error) {
+	if s == "" {
+		return nil, nil, errors.New("secret path required")
 	}
 
-	// Get the current version from metadata
-	metadataPath := make([]string, len(pp))
-	copy(metadataPath, pp)
+	ss := strings.Split(s, "/")
+	if len(ss) < 2 {
+		return nil, nil, errors.New("secret path must be in kv/path/to/secret format")
+	}
+
+	// Get metadata for current version
+	metadataPath := make([]string, len(ss))
+	copy(metadataPath, ss)
 	metadataPath = insertSliceString(metadataPath, 1, "metadata")
 	metadataPathStr := strings.Join(metadataPath, "/")
 
 	metadata, err := vc.Client.Logical().ReadWithContext(ctx, metadataPathStr)
-
-	// Prepare the cas value
-	var cas *int = nil
-
-	// If metadata exists and has a current_version field
+	
+	var currentVersion *int = nil
 	if err == nil && metadata != nil && metadata.Data != nil {
 		if cv, ok := metadata.Data["current_version"]; ok {
-			// Handle different possible types
 			switch v := cv.(type) {
 			case json.Number:
 				if intVal, err := v.Int64(); err == nil {
 					intCas := int(intVal)
-					cas = &intCas
+					currentVersion = &intCas
 				}
 			case float64:
 				intCas := int(v)
-				cas = &intCas
+				currentVersion = &intCas
 			case int:
-				cas = &v
+				currentVersion = &v
 			case int64:
 				intCas := int(v)
-				cas = &intCas
+				currentVersion = &intCas
 			}
 		}
 	}
 
-	// Use the WriteSecretOnce function with the cas value
-	return vc.WriteSecretOnce(ctx, originalPath, s, cas)
+	// Read secret data
+	dataPath := make([]string, len(ss))
+	copy(dataPath, ss)
+	dataPath = insertSliceString(dataPath, 1, "data")
+	dataPathStr := strings.Join(dataPath, "/")
+
+	secret, err := vc.Client.Logical().ReadWithContext(ctx, dataPathStr)
+	if err != nil {
+		return currentVersion, nil, err
+	}
+	
+	if secret == nil || secret.Data == nil {
+		return currentVersion, nil, errors.New("secret not found: " + s)
+	}
+
+	if secret.Data["data"] == nil {
+		return currentVersion, nil, errors.New("secret data not found: " + s)
+	}
+
+	secretData := secret.Data["data"].(map[string]interface{})
+	return currentVersion, secretData, nil
 }
 
 // DeleteSecret deletes a secret from path p

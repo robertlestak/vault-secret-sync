@@ -1,6 +1,6 @@
 module github.com/robertlestak/vault-secret-sync
 
-go 1.23.4
+go 1.25.3
 
 // required for hashicorp/vault
 replace github.com/pires/go-proxyproto v1.0.0 => github.com/pires/go-proxyproto v0.7.0
