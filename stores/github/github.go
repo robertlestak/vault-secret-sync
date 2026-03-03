@@ -27,11 +27,12 @@ import (
 )
 
 type GitHubClient struct {
-	Owner string `yaml:"owner,omitempty" json:"owner,omitempty"`
-	Repo  string `yaml:"repo,omitempty" json:"repo,omitempty"`
-	Env   string `yaml:"env,omitempty" json:"env,omitempty"`
-	Org   bool   `yaml:"org,omitempty" json:"org,omitempty"`
-	Merge *bool  `yaml:"merge,omitempty" json:"merge,omitempty"`
+	Owner      string `yaml:"owner,omitempty" json:"owner,omitempty"`
+	Repo       string `yaml:"repo,omitempty" json:"repo,omitempty"`
+	Env        string `yaml:"env,omitempty" json:"env,omitempty"`
+	Org        bool   `yaml:"org,omitempty" json:"org,omitempty"`
+	Dependabot bool   `yaml:"dependabot,omitempty" json:"dependabot,omitempty"`
+	Merge      *bool  `yaml:"merge,omitempty" json:"merge,omitempty"`
 
 	InstallId        int    `yaml:"installId,omitempty" json:"installId,omitempty"`
 	AppId            int    `yaml:"appId,omitempty" json:"appId,omitempty"`
@@ -81,6 +82,14 @@ func (c *GitHubClient) Validate() error {
 	// if both repo and org true, return error
 	if c.Repo != "" && c.Org {
 		return errors.New("either repo or org can be defined, not both")
+	}
+	// dependabot requires repo
+	if c.Dependabot && c.Repo == "" {
+		return errors.New("repo is required for dependabot secrets")
+	}
+	// dependabot cannot be used with env or org
+	if c.Dependabot && (c.Env != "" || c.Org) {
+		return errors.New("dependabot cannot be used with env or org")
 	}
 	if c.Repo == "" && c.Env != "" {
 		return errors.New("repo is required for env-scoped secrets")
@@ -480,14 +489,21 @@ func (g *GitHubClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 			l.Debugf("skipping empty secret: %s", k)
 			continue
 		}
-		esecret, err := g.EncryptSecret(ctx, k, fmt.Sprintf("%v", v))
-		if err != nil {
-			writeErrs[k] = err
-			continue
-		}
 
-		err = g.withRetry(ctx, fmt.Sprintf("WriteSecret-%s", k), func() error {
-			var err error
+		err := g.withRetry(ctx, fmt.Sprintf("WriteSecret-%s", k), func() error {
+			if g.Dependabot {
+				desecret, err := g.EncryptDependabotSecret(ctx, k, fmt.Sprintf("%v", v))
+				if err != nil {
+					return err
+				}
+				_, err = g.client.Dependabot.CreateOrUpdateRepoSecret(ctx, g.Owner, g.Repo, desecret)
+				return err
+			}
+
+			esecret, err := g.EncryptSecret(ctx, k, fmt.Sprintf("%v", v))
+			if err != nil {
+				return err
+			}
 			if g.Org {
 				esecret.Visibility = "all"
 				_, err = g.client.Actions.CreateOrUpdateOrgSecret(ctx, g.Owner, esecret)
@@ -536,7 +552,9 @@ func (g *GitHubClient) DeleteSecret(ctx context.Context, secret string) error {
 	for _, s := range secretList {
 		err = g.withRetry(ctx, fmt.Sprintf("DeleteSecret-%s", s), func() error {
 			var err error
-			if g.Org {
+			if g.Dependabot {
+				_, err = g.client.Dependabot.DeleteRepoSecret(ctx, g.Owner, g.Repo, s)
+			} else if g.Org {
 				_, err = g.client.Actions.DeleteOrgSecret(ctx, g.Owner, s)
 			} else if g.Env != "" {
 				rid, err := g.RepoID(ctx)
@@ -579,7 +597,9 @@ func (g *GitHubClient) ListSecrets(ctx context.Context, p string) ([]string, err
 			var err error
 			var resp *github.Response
 
-			if g.Org {
+			if g.Dependabot {
+				secrets, resp, err = g.client.Dependabot.ListRepoSecrets(ctx, g.Owner, g.Repo, opt)
+			} else if g.Org {
 				secrets, resp, err = g.client.Actions.ListOrgSecrets(ctx, g.Owner, opt)
 			} else if g.Env != "" {
 				rid, err := g.RepoID(ctx)
@@ -666,6 +686,19 @@ func (g *GitHubClient) GetRepoPublicKey(ctx context.Context) (*github.PublicKey,
 	return pubKey, err
 }
 
+func (g *GitHubClient) GetDependabotPublicKey(ctx context.Context) (*github.PublicKey, error) {
+	var pubKey *github.PublicKey
+	err := g.withRetry(ctx, "GetDependabotPublicKey", func() error {
+		var err error
+		pubKey, _, err = g.client.Dependabot.GetRepoPublicKey(ctx, g.Owner, g.Repo)
+		if err != nil {
+			return fmt.Errorf("error getting dependabot public key %s %s: %w", g.Owner, g.Repo, err)
+		}
+		return nil
+	})
+	return pubKey, err
+}
+
 func (g *GitHubClient) EncryptSecret(ctx context.Context, name, plainText string) (*github.EncryptedSecret, error) {
 	es := &github.EncryptedSecret{
 		Name: name,
@@ -681,6 +714,38 @@ func (g *GitHubClient) EncryptSecret(ctx context.Context, name, plainText string
 	} else {
 		pubKey, err = g.GetRepoPublicKey(ctx)
 	}
+	if err != nil {
+		return nil, err
+	}
+
+	es.KeyID = pubKey.GetKeyID()
+	if es.KeyID == "" {
+		return nil, errors.New("public key ID is empty")
+	}
+	if plainText == "" {
+		return nil, errors.New("plainText is empty")
+	}
+
+	keyDec, err := base64.StdEncoding.DecodeString(pubKey.GetKey())
+	if err != nil {
+		return nil, err
+	}
+
+	d, serr := cryptobox.CryptoBoxSeal([]byte(plainText), []byte(keyDec))
+	if serr != 0 {
+		return nil, fmt.Errorf("error encrypting secret: %d", serr)
+	}
+
+	es.EncryptedValue = base64.StdEncoding.EncodeToString(d)
+	return es, nil
+}
+
+func (g *GitHubClient) EncryptDependabotSecret(ctx context.Context, name, plainText string) (*github.DependabotEncryptedSecret, error) {
+	es := &github.DependabotEncryptedSecret{
+		Name: name,
+	}
+
+	pubKey, err := g.GetDependabotPublicKey(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -724,6 +789,9 @@ func (c *GitHubClient) SetDefaults(cfg any) error {
 	}
 	if !c.Org && nc.Org {
 		c.Org = nc.Org
+	}
+	if !c.Dependabot && nc.Dependabot {
+		c.Dependabot = nc.Dependabot
 	}
 	if c.Owner == "" && nc.Owner != "" {
 		c.Owner = nc.Owner
