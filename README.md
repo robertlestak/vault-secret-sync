@@ -8,7 +8,9 @@ Currently, the following secret stores are supported:
 - AWS Secrets Manager
 - GCP Secret Manager
 - GitHub Repository
+- GitHub Repository Environment
 - GitHub Organization
+- GitHub Dependabot
 
 ## High Level Architecture
 
@@ -243,7 +245,7 @@ The Vault destination driver will write the secret to the target Vault instance.
 
 #### GitHub (Driver: `github`)
 
-The GitHub destination driver will write the secret to a GitHub repository or organization.
+The GitHub destination driver will write the secret to a GitHub repository, environment, organization, or Dependabot.
 
 ```yaml
   dest:
@@ -252,8 +254,17 @@ The GitHub destination driver will write the secret to a GitHub repository or or
       env: "" # optional, default empty. Set to a specific environment to sync to within a repo if needed
       owner: "robertlestak" # optional, will default to the company org
       org: false # optional, default false. set to true to set org secret rather than repo secret
+      dependabot: false # optional, default false. set to true to set dependabot secret rather than actions secret
       merge: false # optional, default true. false will overwrite existing secrets with values from vault, merge will merge the two
 ```
+
+**Secret Types:**
+- **Repository Actions Secrets** (default): Set `repo` field
+- **Environment Secrets**: Set `repo` and `env` fields
+- **Organization Secrets**: Set `org: true`
+- **Dependabot Secrets**: Set `dependabot: true` and `repo` field
+
+**Note:** `dependabot` cannot be used with `env` or `org` options.
 
 Note that since GitHub secrets do not have a concept of pathing, if you are syncing a multi-level regex source path, the secrets will be overwritten in the destination repository. If you need to sync multiple source paths to a single destination repository, you will need to set `merge: true`.
 
