@@ -3,9 +3,12 @@ package vault
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 
+	"github.com/hashicorp/vault/api"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -68,12 +71,12 @@ func (m *mockVaultLogical) write(ctx context.Context, path string, data map[stri
 	if options, ok := data["options"].(map[string]interface{}); ok {
 		if casVal, ok := options["cas"]; ok {
 			expectedCAS := casVal.(int)
-			
+
 			if m.casFailureCount > 0 {
 				m.casFailureCount--
 				return fmt.Errorf("check-and-set parameter did not match")
 			}
-			
+
 			if expectedCAS != currentVersion {
 				return fmt.Errorf("check-and-set parameter did not match: expected %d, got %d", currentVersion, expectedCAS)
 			}
@@ -128,17 +131,17 @@ func indexOf(s, substr string) int {
 
 func TestConcurrentWrites_CASConflict(t *testing.T) {
 	mock := newMockVaultLogical()
-	
+
 	mock.secrets["kv/test/secret"] = map[string]interface{}{
 		"existing_key": "existing_value",
 	}
 	mock.versions["kv/test/secret"] = 1
 
 	ctx := context.Background()
-	
+
 	var wg sync.WaitGroup
 	errors := make([]error, 2)
-	
+
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
@@ -153,7 +156,7 @@ func TestConcurrentWrites_CASConflict(t *testing.T) {
 			},
 		})
 	}()
-	
+
 	go func() {
 		defer wg.Done()
 		dataToWrite := map[string]interface{}{
@@ -167,9 +170,9 @@ func TestConcurrentWrites_CASConflict(t *testing.T) {
 			},
 		})
 	}()
-	
+
 	wg.Wait()
-	
+
 	successCount := 0
 	casFailCount := 0
 	for _, err := range errors {
@@ -179,7 +182,7 @@ func TestConcurrentWrites_CASConflict(t *testing.T) {
 			casFailCount++
 		}
 	}
-	
+
 	assert.Equal(t, 1, successCount, "exactly one write should succeed")
 	assert.Equal(t, 1, casFailCount, "exactly one write should fail with CAS error")
 	assert.Equal(t, 2, mock.versions["kv/test/secret"], "version should be incremented once")
@@ -187,7 +190,7 @@ func TestConcurrentWrites_CASConflict(t *testing.T) {
 
 func TestGetSecretWithVersion_Success(t *testing.T) {
 	mock := newMockVaultLogical()
-	
+
 	mock.secrets["kv/test/secret"] = map[string]interface{}{
 		"key1": "value1",
 		"key2": "value2",
@@ -195,16 +198,16 @@ func TestGetSecretWithVersion_Success(t *testing.T) {
 	mock.versions["kv/test/secret"] = 5
 
 	ctx := context.Background()
-	
+
 	metadata, err := mock.read(ctx, "kv/metadata/test/secret")
 	require.NoError(t, err)
-	
+
 	secret, err := mock.read(ctx, "kv/data/test/secret")
 	require.NoError(t, err)
-	
+
 	version := metadata["current_version"].(int)
 	assert.Equal(t, 5, version)
-	
+
 	data := secret["data"].(map[string]interface{})
 	assert.Equal(t, "value1", data["key1"])
 	assert.Equal(t, "value2", data["key2"])
@@ -212,7 +215,7 @@ func TestGetSecretWithVersion_Success(t *testing.T) {
 
 func TestCASRetry_EventualSuccess(t *testing.T) {
 	mock := newMockVaultLogical()
-	
+
 	mock.secrets["kv/test/secret"] = map[string]interface{}{
 		"existing": "data",
 	}
@@ -220,17 +223,17 @@ func TestCASRetry_EventualSuccess(t *testing.T) {
 	mock.casFailureCount = 2
 
 	ctx := context.Background()
-	
+
 	metadata, err := mock.read(ctx, "kv/metadata/test/secret")
 	require.NoError(t, err)
 	version := metadata["current_version"].(int)
 	assert.Equal(t, 1, version)
-	
+
 	dataToWrite := map[string]interface{}{
 		"existing": "data",
 		"new_key":  "new_value",
 	}
-	
+
 	err = mock.write(ctx, "kv/data/test/secret", map[string]interface{}{
 		"data": dataToWrite,
 		"options": map[string]interface{}{
@@ -239,7 +242,7 @@ func TestCASRetry_EventualSuccess(t *testing.T) {
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "check-and-set")
-	
+
 	err = mock.write(ctx, "kv/data/test/secret", map[string]interface{}{
 		"data": dataToWrite,
 		"options": map[string]interface{}{
@@ -248,7 +251,7 @@ func TestCASRetry_EventualSuccess(t *testing.T) {
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "check-and-set")
-	
+
 	err = mock.write(ctx, "kv/data/test/secret", map[string]interface{}{
 		"data": dataToWrite,
 		"options": map[string]interface{}{
@@ -256,7 +259,7 @@ func TestCASRetry_EventualSuccess(t *testing.T) {
 		},
 	})
 	assert.NoError(t, err)
-	
+
 	assert.Equal(t, 2, mock.versions["kv/test/secret"])
 	assert.Equal(t, "new_value", mock.secrets["kv/test/secret"]["new_key"])
 }
@@ -304,7 +307,7 @@ func TestMergeLogic(t *testing.T) {
 					dataToWrite[k] = v
 				}
 			}
-			
+
 			assert.Equal(t, tt.expected, dataToWrite)
 		})
 	}
@@ -312,7 +315,7 @@ func TestMergeLogic(t *testing.T) {
 
 func TestSimulateConcurrentUflipRotation(t *testing.T) {
 	mock := newMockVaultLogical()
-	
+
 	// Initial state - both old secrets
 	mock.secrets["kv/apps/example-api/secrets"] = map[string]interface{}{
 		"api_secret": "old_api_secret",
@@ -321,31 +324,31 @@ func TestSimulateConcurrentUflipRotation(t *testing.T) {
 	mock.versions["kv/apps/example-api/secrets"] = 10
 
 	ctx := context.Background()
-	
+
 	// Both syncs read the same version first
 	metadata, _ := mock.read(ctx, "kv/metadata/apps/example-api/secrets")
 	initialVersion := metadata["current_version"].(int)
-	
+
 	secret, _ := mock.read(ctx, "kv/data/apps/example-api/secrets")
 	initialData := secret["data"].(map[string]interface{})
-	
+
 	// Prepare both merged datasets
 	apiMerged := make(map[string]interface{})
 	for k, v := range initialData {
 		apiMerged[k] = v
 	}
 	apiMerged["api_secret"] = "new_api_secret"
-	
+
 	uiMerged := make(map[string]interface{})
 	for k, v := range initialData {
 		uiMerged[k] = v
 	}
 	uiMerged["ui_secret"] = "new_ui_secret"
-	
+
 	// Now both try to write with the same CAS version
 	var wg sync.WaitGroup
 	results := make([]error, 2)
-	
+
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
@@ -356,7 +359,7 @@ func TestSimulateConcurrentUflipRotation(t *testing.T) {
 			},
 		})
 	}()
-	
+
 	go func() {
 		defer wg.Done()
 		results[1] = mock.write(ctx, "kv/data/apps/example-api/secrets", map[string]interface{}{
@@ -366,9 +369,9 @@ func TestSimulateConcurrentUflipRotation(t *testing.T) {
 			},
 		})
 	}()
-	
+
 	wg.Wait()
-	
+
 	// One should succeed, one should get CAS error (needs retry)
 	successCount := 0
 	failCount := 0
@@ -379,18 +382,18 @@ func TestSimulateConcurrentUflipRotation(t *testing.T) {
 			failCount++
 		}
 	}
-	
+
 	assert.Equal(t, 1, successCount, "one sync should succeed")
 	assert.Equal(t, 1, failCount, "one sync should fail and need retry")
 	assert.Equal(t, 11, mock.versions["kv/apps/example-api/secrets"], "version should increment once")
-	
+
 	// The failed sync should retry with new version
 	metadata, _ = mock.read(ctx, "kv/metadata/apps/example-api/secrets")
 	newVersion := metadata["current_version"].(int)
-	
+
 	secret, _ = mock.read(ctx, "kv/data/apps/example-api/secrets")
 	currentData := secret["data"].(map[string]interface{})
-	
+
 	// Merge the other secret
 	merged := make(map[string]interface{})
 	for k, v := range currentData {
@@ -398,17 +401,17 @@ func TestSimulateConcurrentUflipRotation(t *testing.T) {
 	}
 	merged["api_secret"] = "new_api_secret"
 	merged["ui_secret"] = "new_ui_secret"
-	
+
 	err := mock.write(ctx, "kv/data/apps/example-api/secrets", map[string]interface{}{
 		"data": merged,
 		"options": map[string]interface{}{
 			"cas": newVersion,
 		},
 	})
-	
+
 	assert.NoError(t, err, "retry should succeed")
 	assert.Equal(t, 12, mock.versions["kv/apps/example-api/secrets"])
-	
+
 	// Verify both secrets are now updated
 	finalSecret, _ := mock.read(ctx, "kv/data/apps/example-api/secrets")
 	finalData := finalSecret["data"].(map[string]interface{})
@@ -416,3 +419,29 @@ func TestSimulateConcurrentUflipRotation(t *testing.T) {
 	assert.Equal(t, "new_ui_secret", finalData["ui_secret"])
 }
 
+func TestListSecretsOnceAllowsMountRoot(t *testing.T) {
+	var method string
+	var requestedPath string
+	var requestedQuery string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method = r.Method
+		requestedPath = r.URL.Path
+		requestedQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"keys":["GLOBAL","stores/"]}}`))
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(&api.Config{Address: server.URL})
+	require.NoError(t, err)
+
+	vc := &VaultClient{Client: client}
+	keys, err := vc.ListSecretsOnce(context.Background(), "dev-tempo")
+	require.NoError(t, err)
+
+	assert.Equal(t, http.MethodGet, method)
+	assert.Equal(t, "/v1/dev-tempo/metadata", requestedPath)
+	assert.Equal(t, "list=true", requestedQuery)
+	assert.Equal(t, []string{"GLOBAL", "stores/"}, keys)
+}

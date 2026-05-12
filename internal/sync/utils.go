@@ -243,9 +243,6 @@ func LoopWildcardRecursive(ctx context.Context, source SyncClient, sourcePath st
 	var fullList []string
 	sp := findHighestNonRegexPath(sourcePath)
 	list, err := source.ListSecrets(ctx, sp)
-	if err != nil && strings.Contains(err.Error(), "secret path must be in kv/path/to/secret format") {
-		return []string{sp}, nil
-	}
 	if err != nil {
 		l.Error(err)
 		return fullList, err
