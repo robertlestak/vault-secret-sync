@@ -310,7 +310,7 @@ func (vc *VaultClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 		"path":    s,
 		"method":  vc.AuthMethod,
 	})
-	
+
 	var newData map[string]interface{}
 	err := json.Unmarshal(bData, &newData)
 	if err != nil {
@@ -367,11 +367,11 @@ func (vc *VaultClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 					"attempt":      attempt,
 					"expected_cas": currentVersion,
 				}).Warn("CAS conflict detected, retrying")
-				
+
 				attempt++
 				continue
 			}
-			
+
 			if attempt == 0 {
 				terr := vc.NewToken(ctx)
 				if terr != nil {
@@ -380,7 +380,7 @@ func (vc *VaultClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 				attempt++
 				continue
 			}
-			
+
 			return nil, fmt.Errorf("failed to write secret: %w", err)
 		}
 
@@ -445,7 +445,7 @@ func (vc *VaultClient) getSecretWithVersion(ctx context.Context, s string) (*int
 	metadataPathStr := strings.Join(metadataPath, "/")
 
 	metadata, err := vc.Client.Logical().ReadWithContext(ctx, metadataPathStr)
-	
+
 	var currentVersion *int = nil
 	if err == nil && metadata != nil && metadata.Data != nil {
 		if cv, ok := metadata.Data["current_version"]; ok {
@@ -477,7 +477,7 @@ func (vc *VaultClient) getSecretWithVersion(ctx context.Context, s string) (*int
 	if err != nil {
 		return currentVersion, nil, err
 	}
-	
+
 	if secret == nil || secret.Data == nil {
 		return currentVersion, nil, errors.New("secret not found: " + s)
 	}
@@ -531,12 +531,11 @@ func (vc *VaultClient) ListSecretsOnce(ctx context.Context, p string) ([]string,
 	if p == "" {
 		return nil, errors.New("secret path required")
 	}
-	pp := strings.Split(p, "/")
-	if len(pp) < 2 {
-		return nil, errors.New("secret path must be in kv/path/to/secret format")
+	if !strings.Contains(p, "/metadata/") {
+		pp := strings.Split(p, "/")
+		pp = insertSliceString(pp, 1, "metadata")
+		p = strings.Join(pp, "/")
 	}
-	pp = insertSliceString(pp, 1, "metadata")
-	p = strings.Join(pp, "/")
 	l := log.WithFields(log.Fields{
 		"address": vc.Address,
 		"role":    vc.Role,
@@ -554,10 +553,17 @@ func (vc *VaultClient) ListSecretsOnce(ctx context.Context, p string) ([]string,
 	if secret == nil {
 		return nil, nil
 	}
-	k := secret.Data["keys"].([]interface{})
+	k, ok := secret.Data["keys"].([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("vault list response missing keys")
+	}
 	var keys []string
 	for _, v := range k {
-		keys = append(keys, v.(string))
+		key, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("vault list response key is not a string")
+		}
+		keys = append(keys, key)
 	}
 	return keys, nil
 }

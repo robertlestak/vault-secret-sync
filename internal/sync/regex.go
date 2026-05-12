@@ -88,6 +88,7 @@ func handleManualRegexSync(ctx context.Context, sc *SyncClients, j SyncJob) erro
 	}
 
 	// Create tasks and send them to the task channel
+	taskCount := 0
 	for _, d := range sc.Dest {
 		ll := log.WithFields(log.Fields{"store": d.Driver()})
 		ll.Debug("dest store")
@@ -112,12 +113,13 @@ func handleManualRegexSync(ctx context.Context, sc *SyncClients, j SyncJob) erro
 			}
 
 			taskCh <- manualSyncTask{dest: d, srcPath: p, rewritePath: rewritePath}
+			taskCount++
 		}
 	}
 	close(taskCh)
 
 	var errors []error
-	for i := 0; i < len(sc.Dest)*len(list); i++ {
+	for i := 0; i < taskCount; i++ {
 		if err := <-errCh; err != nil {
 			errors = append(errors, err)
 		}
@@ -282,6 +284,7 @@ func handleManualRegexDelete(ctx context.Context, sc *SyncClients, j SyncJob) er
 	}
 
 	// Create tasks and send them to the task channel
+	taskCount := 0
 	for _, d := range sc.Dest {
 		for _, p := range list {
 			if !rx.MatchString(p) {
@@ -295,13 +298,14 @@ func handleManualRegexDelete(ctx context.Context, sc *SyncClients, j SyncJob) er
 					rewritePath = strings.ReplaceAll(rewritePath, groupName, match)
 				}
 				taskCh <- manualDeleteTask{dest: d, rewritePath: rewritePath}
+				taskCount++
 			}
 		}
 	}
 	close(taskCh)
 
 	var errors []error
-	for i := 0; i < len(sc.Dest)*len(list); i++ {
+	for i := 0; i < taskCount; i++ {
 		if err := <-errCh; err != nil {
 			errors = append(errors, err)
 		}
