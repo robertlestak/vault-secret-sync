@@ -2,6 +2,7 @@ package transforms
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -9,6 +10,7 @@ import (
 	"text/template"
 
 	"github.com/robertlestak/vault-secret-sync/api/v1alpha1"
+	log "github.com/sirupsen/logrus"
 )
 
 func ExecuteTransformTemplate(sc v1alpha1.VaultSecretSync, secret []byte) ([]byte, error) {
@@ -20,6 +22,7 @@ func ExecuteTransformTemplate(sc v1alpha1.VaultSecretSync, secret []byte) ([]byt
 			// Convert the value to JSON for more complex structures
 			bytes, err := json.Marshal(v)
 			if err != nil {
+				log.WithError(err).Warn("failed to marshal template value as JSON")
 				return ""
 			}
 			return string(bytes)
@@ -31,6 +34,16 @@ func ExecuteTransformTemplate(sc v1alpha1.VaultSecretSync, secret []byte) ([]byt
 		"int": func(v interface{}) int {
 			// Convert the value to an int
 			return v.(int)
+		},
+		"base64encode": func(v interface{}) string {
+			return base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%v", v)))
+		},
+		"base64decode": func(v interface{}) (string, error) {
+			decoded, err := base64.StdEncoding.DecodeString(fmt.Sprintf("%v", v))
+			if err != nil {
+				return "", err
+			}
+			return string(decoded), nil
 		},
 	}).Parse(strings.TrimSpace(*sc.Spec.Transforms.Template))
 	if err != nil {

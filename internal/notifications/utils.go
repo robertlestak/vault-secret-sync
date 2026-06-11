@@ -20,6 +20,7 @@ func renderTemplate(tmplString string, data v1alpha1.NotificationMessage) (strin
 			// Convert the value to JSON for more complex structures
 			bytes, err := json.Marshal(v)
 			if err != nil {
+				log.WithError(err).Warn("failed to marshal template value as JSON")
 				return fmt.Sprintf("error marshaling JSON: %v", err)
 			}
 			return string(bytes)
@@ -66,6 +67,7 @@ func messagePayload(message v1alpha1.NotificationMessage, body string) string {
 		// Marshal the data to JSON
 		payload, err := json.Marshal(message)
 		if err != nil {
+			l.WithError(err).Warn("failed to marshal notification message as JSON")
 			return ""
 		}
 		l.Debugf("default body: %s", string(payload))

@@ -63,7 +63,7 @@ spec:
       to: "new_key"
     template: |
       {
-        "new_password": "{{ .password }}",
+        "new_password": {{ .password | json }},
         {{ if eq .customField "someValue" }}
         "conditional_field": "included_value"
         {{ else }}
@@ -213,7 +213,7 @@ Apply a Go template to the secret data. The template will be passed the secret o
   transforms:
     template: |
       {
-        "then_templates_are_processed": "{{ .renames_processed_first }}"
+        "then_templates_are_processed": {{ .renames_processed_first | json }}
       }
 ```
 
@@ -221,6 +221,25 @@ Apply a Go template to the secret data. The template will be passed the secret o
   transforms:
     template: |
       {{ .simple_string_data }}
+```
+
+Template functions are available for common conversions:
+
+- `json`: marshal a value to JSON
+- `string`: convert a value to a string
+- `int`: convert a value to an integer
+- `base64encode`: encode a value using standard base64 encoding
+- `base64decode`: decode a standard base64 encoded value
+
+When rendering JSON from a template, pipe string values through `json` so values containing quotes, backslashes, or other special JSON characters are escaped safely.
+
+```yaml
+  transforms:
+    template: |
+      {
+        "base64encoded": {{ .password | base64encode | json }},
+        "base64decoded": {{ .base64encoded | base64decode | json }}
+      }
 ```
 
 ### Destination Configuration

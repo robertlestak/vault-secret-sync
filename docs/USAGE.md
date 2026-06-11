@@ -128,6 +128,78 @@ Filters can be applied to the sync to include or exclude secrets based on either
 ```
 
 
+### Transforms
+
+Transforms can be applied to secret data before it is synced to the destination.
+
+#### Exclude
+
+Exclude specific keys from the sync. All other keys not specified will be synced.
+
+```yaml
+  transforms:
+    exclude:
+    - "key_to_exclude"
+```
+
+#### Include
+
+Include only specific keys in the sync. All other keys not specified will be excluded.
+
+```yaml
+  transforms:
+    include:
+    - "key_to_include"
+```
+
+#### Rename
+
+Rename a key in the secret data before it is synced to the destination.
+
+```yaml
+  transforms:
+    rename:
+    - from: "old_password"
+      to: "renames_processed_first"
+```
+
+#### Template
+
+Apply a Go template to the secret data. The template will be passed the secret object as a `map[string]any`, and the result of the template will be the new secret data bytes. If writing to a backend which requires key-value pairs, the template should output a JSON object which can marshal to a `map[string]any`.
+
+```yaml
+  transforms:
+    template: |
+      {
+        "then_templates_are_processed": {{ .renames_processed_first | json }}
+      }
+```
+
+```yaml
+  transforms:
+    template: |
+      {{ .simple_string_data }}
+```
+
+Template functions are available for common conversions:
+
+- `json`: marshal a value to JSON
+- `string`: convert a value to a string
+- `int`: convert a value to an integer
+- `base64encode`: encode a value using standard base64 encoding
+- `base64decode`: decode a standard base64 encoded value
+
+When rendering JSON from a template, pipe string values through `json` so values containing quotes, backslashes, or other special JSON characters are escaped safely.
+
+```yaml
+  transforms:
+    template: |
+      {
+        "base64encoded": {{ .password | base64encode | json }},
+        "base64decoded": {{ .base64encoded | base64decode | json }}
+      }
+```
+
 ### Destination Configuration
 
 The destination is configured in the same way as the source, with the exception that the `driver` field can be specified. If no driver is specified, the default driver is `vault`.
