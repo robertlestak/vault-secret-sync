@@ -39,6 +39,45 @@ func TestExecuteTransformTemplate(t *testing.T) {
 			expected: []byte(`{"newKey":"value"}`),
 			wantErr:  false,
 		},
+		{
+			name: "Base64 encode template function",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{
+						Template: ptrToString(`{"encoded":{{ .password | base64encode | json }}}`),
+					},
+				},
+			},
+			secret:   []byte(`{"password":"pa$$word"}`),
+			expected: []byte(`{"encoded":"cGEkJHdvcmQ="}`),
+			wantErr:  false,
+		},
+		{
+			name: "Base64 decode template function",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{
+						Template: ptrToString(`{"password":{{ .encoded | base64decode | json }}}`),
+					},
+				},
+			},
+			secret:   []byte(`{"encoded":"cGEkJHdvcmQ="}`),
+			expected: []byte(`{"password":"pa$$word"}`),
+			wantErr:  false,
+		},
+		{
+			name: "Base64 decode template function invalid input",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{
+						Template: ptrToString(`{"password":{{ .encoded | base64decode | json }}}`),
+					},
+				},
+			},
+			secret:   []byte(`{"encoded":"not base64!"}`),
+			expected: []byte(`{"encoded":"not base64!"}`),
+			wantErr:  true,
+		},
 	}
 
 	for _, tt := range tests {
