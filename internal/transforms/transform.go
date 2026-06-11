@@ -2,6 +2,7 @@ package transforms
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -16,13 +17,13 @@ func ExecuteTransformTemplate(sc v1alpha1.VaultSecretSync, secret []byte) ([]byt
 		return secret, nil
 	}
 	t, err := template.New("transform").Funcs(template.FuncMap{
-		"json": func(v interface{}) string {
+		"json": func(v interface{}) (string, error) {
 			// Convert the value to JSON for more complex structures
-			bytes, err := json.Marshal(v)
+			jsonBytes, err := json.Marshal(v)
 			if err != nil {
-				return ""
+				return "", err
 			}
-			return string(bytes)
+			return string(jsonBytes), nil
 		},
 		"string": func(v interface{}) string {
 			// Convert the value to a string
@@ -31,6 +32,24 @@ func ExecuteTransformTemplate(sc v1alpha1.VaultSecretSync, secret []byte) ([]byt
 		"int": func(v interface{}) int {
 			// Convert the value to an int
 			return v.(int)
+		},
+		"base64encode": func(v any) (string, error) {
+			s, ok := v.(string)
+			if !ok {
+				return "", fmt.Errorf("base64encode expects string, got %T", v)
+			}
+			return base64.StdEncoding.EncodeToString([]byte(s)), nil
+		},
+		"base64decode": func(v any) (string, error) {
+			s, ok := v.(string)
+			if !ok {
+				return "", fmt.Errorf("base64decode expects string, got %T", v)
+			}
+			data, err := base64.StdEncoding.DecodeString(s)
+			if err != nil {
+				return "", err
+			}
+			return string(data), nil
 		},
 	}).Parse(strings.TrimSpace(*sc.Spec.Transforms.Template))
 	if err != nil {

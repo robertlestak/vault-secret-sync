@@ -223,6 +223,40 @@ Apply a Go template to the secret data. The template will be passed the secret o
       {{ .simple_string_data }}
 ```
 
+Template transforms use Go's `text/template` syntax and include the following helper functions:
+
+| Function       | Description                                                                                                                    |
+|----------------|--------------------------------------------------------------------------------------------------------------------------------|
+| `json`         | Marshals a value to JSON. Useful for safely rendering strings, objects, arrays, and values containing JSON-special characters. |
+| `string`       | Converts a value to a string using Go string formatting.                                                                       |
+| `int`          | Converts a value to an int.                                                                                                    |
+| `base64encode` | Base64-encodes a string value.                                                                                                 |
+| `base64decode` | Base64-decodes a string value.                                                                                                 |
+
+##### JSON escaping
+
+When producing JSON output, values containing quotes, backslashes, newlines, or other JSON-special characters should be escaped with the `json` helper.
+```yaml
+  transforms:
+    template: |
+      {
+        "cannot_handle_json_chars_in_password": "{{ .password }}", ⚠️
+        "safely_escaped_password": {{ .password | json }}          ✅
+      }
+```
+
+##### Base64 encoding / decoding
+Base64 encoding and decoding can be performed with the `base64encode` and `base64decode` helpers.
+Especially after decoding, it's suggested to escape JSON-special characters with the `json` helper.
+```yaml
+  transforms:
+    template: |
+      {
+        "base64encoded": {{ .password | base64encode | json }},
+        "base64decoded": {{ .base64encoded | base64decode | json }}
+      }
+```
+
 ### Destination Configuration
 
 While the Secret Driver is technically a generic interface, currently, the service implements a one-way secret sync from the source to the destination, where only `vault` type data stores are supported as the source. The destination can be any of the supported secret stores. This is by design, to ensure that the source of truth is always Vault.

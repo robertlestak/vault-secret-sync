@@ -9,11 +9,12 @@ import (
 
 func TestExecuteTransformTemplate(t *testing.T) {
 	tests := []struct {
-		name     string
-		sc       v1alpha1.VaultSecretSync
-		secret   []byte
-		expected []byte
-		wantErr  bool
+		name        string
+		sc          v1alpha1.VaultSecretSync
+		secret      []byte
+		expected    []byte
+		wantErr     bool
+		errContains string
 	}{
 		{
 			name: "No template",
@@ -27,16 +28,201 @@ func TestExecuteTransformTemplate(t *testing.T) {
 			wantErr:  false,
 		},
 		{
-			name: "Valid template",
-			sc: v1alpha1.VaultSecretSync{
-				Spec: v1alpha1.VaultSecretSyncSpec{
-					Transforms: &v1alpha1.TransformSpec{
-						Template: ptrToString(`{"newKey":"{{ .key }}"}`),
-					},
-				},
-			},
+			name:     "Valid template",
+			sc:       vaultSecretSyncWithTemplate(`{"newKey":"{{ .key }}"}`),
 			secret:   []byte(`{"key":"value"}`),
 			expected: []byte(`{"newKey":"value"}`),
+			wantErr:  false,
+		},
+		{
+			// this behavior could be changed by setting `.Option("missingkey=error")` on the template
+			name:     "⚠️ requesting unknown key leads to '<no value>' value",
+			sc:       vaultSecretSyncWithTemplate(`{"newKey":"{{ .unknownKey }}"}`),
+			secret:   []byte(`{"key":"value"}`),
+			expected: []byte(`{"newKey":"<no value>"}`),
+			wantErr:  false,
+		},
+		{
+			name:        "⚠️ int function cannot handle ints (42 unmarshals to float64)",
+			sc:          vaultSecretSyncWithTemplate(`{"newKey":{{ .key | int }}}`),
+			secret:      []byte(`{"key":42}`),
+			expected:    []byte(`{"key":42}`),
+			wantErr:     true,
+			errContains: "interface conversion: interface {} is float64, not int",
+		},
+		{
+			name:        "⚠️ int function cannot handle floats",
+			sc:          vaultSecretSyncWithTemplate(`{"newKey":{{ .key | int }}}`),
+			secret:      []byte(`{"key":42.0}`),
+			expected:    []byte(`{"key":42.0}`),
+			wantErr:     true,
+			errContains: "interface conversion: interface {} is float64, not int",
+		},
+		{
+			name:        "⚠️ int function cannot handle int strings",
+			sc:          vaultSecretSyncWithTemplate(`{"newKey":{{ .key | int }}}`),
+			secret:      []byte(`{"key":"42"}`),
+			expected:    []byte(`{"key":"42"}`),
+			wantErr:     true,
+			errContains: "interface conversion: interface {} is string, not int",
+		},
+		{
+			name:        "⚠️ int function cannot handle float strings",
+			sc:          vaultSecretSyncWithTemplate(`{"newKey":{{ .key | int }}}`),
+			secret:      []byte(`{"key":"42.0"}`),
+			expected:    []byte(`{"key":"42.0"}`),
+			wantErr:     true,
+			errContains: "interface conversion: interface {} is string, not int",
+		},
+		{
+			name:     "Nested object",
+			sc:       vaultSecretSyncWithTemplate(`{"newKey":"{{ .key.foo }}"}`),
+			secret:   []byte(`{"key":{"foo":"bar"}}`),
+			expected: []byte(`{"newKey":"bar"}`),
+			wantErr:  false,
+		},
+		{
+			name:        "Invalid template returns error and original secret",
+			sc:          vaultSecretSyncWithTemplate(`{"newKey":"{{ .key "}`),
+			secret:      []byte(`{"key":"value"}`),
+			expected:    []byte(`{"key":"value"}`),
+			wantErr:     true,
+			errContains: "unterminated quoted string",
+		},
+		{
+			name:     "Escape json chars",
+			sc:       vaultSecretSyncWithTemplate(`{"field":{{ .field | json }}}`),
+			secret:   []byte(`{"field":"foo\"bar"}`),
+			expected: []byte(`{"field":"foo\"bar"}`),
+			wantErr:  false,
+		},
+		{
+			name:     "Escape password with json chars",
+			sc:       vaultSecretSyncWithTemplate(`{"field":{{ .field | json }}}`),
+			secret:   []byte(`{"field":"password with special chars \"§$%?\\/()="}`),
+			expected: []byte(`{"field":"password with special chars \"§$%?\\/()="}`),
+			wantErr:  false,
+		},
+		{
+			name:     "⚠️ unescaped password with json chars creates invalid json",
+			sc:       vaultSecretSyncWithTemplate(`{"field":"{{ .field }}"}`),
+			secret:   []byte(`{"field":"password with special chars \"§$%?\\/()="}`),
+			expected: []byte(`{"field":"password with special chars "§$%?\/()="}`),
+			wantErr:  false,
+		},
+		{
+			name:     "Templates can produce invalid json",
+			sc:       vaultSecretSyncWithTemplate(`{"field":"{{ .field }}"}`),
+			secret:   []byte(`{"field":"foo\"bar"}`),
+			expected: []byte(`{"field":"foo"bar"}`),
+			wantErr:  false,
+		},
+		{
+			name:     "String function converts number",
+			sc:       vaultSecretSyncWithTemplate(`{"count":"{{ .count | string }}"}`),
+			secret:   []byte(`{"count":3}`),
+			expected: []byte(`{"count":"3"}`),
+			wantErr:  false,
+		},
+		{
+			name:     "String function on string",
+			sc:       vaultSecretSyncWithTemplate(`{"count":"{{ .count | string }}"}`),
+			secret:   []byte(`{"count":"3"}`),
+			expected: []byte(`{"count":"3"}`),
+			wantErr:  false,
+		},
+		{
+			name:     "base64encode on string",
+			sc:       vaultSecretSyncWithTemplate(`{"field":"{{ .field | base64encode }}"}`),
+			secret:   []byte(`{"field":"foobar"}`),
+			expected: []byte(`{"field":"Zm9vYmFy"}`),
+			wantErr:  false,
+		},
+		{
+			name:     "base64encode on empty string",
+			sc:       vaultSecretSyncWithTemplate(`{"field":"{{ .field | base64encode }}"}`),
+			secret:   []byte(`{"field":""}`),
+			expected: []byte(`{"field":""}`),
+			wantErr:  false,
+		},
+		{
+			name:     "base64encode handles unicode string",
+			sc:       vaultSecretSyncWithTemplate(`{"field":"{{ .field | base64encode }}"}`),
+			secret:   []byte(`{"field":"こんにちは"}`),
+			expected: []byte(`{"field":"44GT44KT44Gr44Gh44Gv"}`),
+			wantErr:  false,
+		},
+		{
+			name:        "base64encode on number returns error",
+			sc:          vaultSecretSyncWithTemplate(`{"field":"{{ .field | base64encode }}"}`),
+			secret:      []byte(`{"field":42}`),
+			expected:    []byte(`{"field":42}`),
+			wantErr:     true,
+			errContains: "base64encode expects string",
+		},
+		{
+			name:     "base64decode on string",
+			sc:       vaultSecretSyncWithTemplate(`{"field":"{{ .field | base64decode }}"}`),
+			secret:   []byte(`{"field":"Zm9vYmFy"}`),
+			expected: []byte(`{"field":"foobar"}`),
+			wantErr:  false,
+		},
+		{
+			name:     "base64decode on empty string",
+			sc:       vaultSecretSyncWithTemplate(`{"field":"{{ .field | base64decode }}"}`),
+			secret:   []byte(`{"field":""}`),
+			expected: []byte(`{"field":""}`),
+			wantErr:  false,
+		},
+		{
+			name:     "base64decode handles unicode string",
+			sc:       vaultSecretSyncWithTemplate(`{"field":"{{ .field | base64decode }}"}`),
+			secret:   []byte(`{"field":"44GT44KT44Gr44Gh44Gv"}`),
+			expected: []byte(`{"field":"こんにちは"}`),
+			wantErr:  false,
+		},
+		{
+			name:     "base64encode preserves padding for single byte",
+			sc:       vaultSecretSyncWithTemplate(`{"field":"{{ .field | base64encode }}"}`),
+			secret:   []byte(`{"field":"f"}`),
+			expected: []byte(`{"field":"Zg=="}`),
+			wantErr:  false,
+		},
+		{
+			name:        "base64decode on number returns error",
+			sc:          vaultSecretSyncWithTemplate(`{"field":"{{ .field | base64decode }}"}`),
+			secret:      []byte(`{"field":42}`),
+			expected:    []byte(`{"field":42}`),
+			wantErr:     true,
+			errContains: "base64decode expects string",
+		},
+		{
+			name:        "base64decode invalid base64 returns error",
+			sc:          vaultSecretSyncWithTemplate(`{"field":"{{ .field | base64decode }}"}`),
+			secret:      []byte(`{"field":"not-valid-base64!"}`),
+			expected:    []byte(`{"field":"not-valid-base64!"}`),
+			wantErr:     true,
+			errContains: "illegal base64 data",
+		},
+		{
+			name:     "base64decode with JSON characters",
+			sc:       vaultSecretSyncWithTemplate(`{"field":{{ .field | base64decode | json }}}`),
+			secret:   []byte(`{"field":"Zm9vImJhcg=="}`),
+			expected: []byte(`{"field":"foo\"bar"}`),
+			wantErr:  false,
+		},
+		{
+			name:     "base64decode JSON construct",
+			sc:       vaultSecretSyncWithTemplate(`{"field":{{ .field | base64decode | json }}}`),
+			secret:   []byte(`{"field":"eyJhIjoiYiJ9"}`),
+			expected: []byte(`{"field":"{\"a\":\"b\"}"}`),
+			wantErr:  false,
+		},
+		{
+			name:     "base64encode then base64decode round trip",
+			sc:       vaultSecretSyncWithTemplate(`{"field":{{ .field | base64encode | base64decode | json }}}`),
+			secret:   []byte(`{"field":"\"foo\"bar\""}`),
+			expected: []byte(`{"field":"\"foo\"bar\""}`),
 			wantErr:  false,
 		},
 	}
@@ -47,6 +233,9 @@ func TestExecuteTransformTemplate(t *testing.T) {
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ExecuteTransformTemplate() error = %v, wantErr %v", err, tt.wantErr)
 				return
+			}
+			if tt.wantErr {
+				assert.ErrorContains(t, err, tt.errContains)
 			}
 			assert.Equal(t, tt.expected, result)
 		})
@@ -267,6 +456,16 @@ func TestExecuteTransforms(t *testing.T) {
 			}
 			assert.Equal(t, tt.expected, result)
 		})
+	}
+}
+
+func vaultSecretSyncWithTemplate(template string) v1alpha1.VaultSecretSync {
+	return v1alpha1.VaultSecretSync{
+		Spec: v1alpha1.VaultSecretSyncSpec{
+			Transforms: &v1alpha1.TransformSpec{
+				Template: ptrToString(template),
+			},
+		},
 	}
 }
 
