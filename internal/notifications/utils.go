@@ -7,6 +7,7 @@ import (
 	"text/template"
 
 	"github.com/robertlestak/vault-secret-sync/api/v1alpha1"
+	"github.com/robertlestak/vault-secret-sync/internal/templatefuncs"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -29,10 +30,7 @@ func renderTemplate(tmplString string, data v1alpha1.NotificationMessage) (strin
 			// Convert the value to a string
 			return fmt.Sprintf("%v", v)
 		},
-		"int": func(v interface{}) int {
-			// Convert the value to an int
-			return v.(int)
-		},
+		"int": templatefuncs.Int,
 	}).Parse(tmplString)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse template: %v", err)

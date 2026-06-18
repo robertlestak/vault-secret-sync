@@ -185,3 +185,32 @@ VaultSecretSync:
 	assert.NoError(t, err)
 	assert.Equal(t, expectedOutput, output)
 }
+
+func TestRenderTemplate_WithIntConversions(t *testing.T) {
+	notificationMessage := v1alpha1.NotificationMessage{
+		Message: "42.0",
+		VaultSecretSync: v1alpha1.VaultSecretSync{
+			Status: v1alpha1.VaultSecretSyncStatus{
+				SyncDestinations: 3,
+			},
+		},
+	}
+
+	templateString := `Message: {{.Message | int}}
+SyncDestinations: {{.VaultSecretSync.Status.SyncDestinations | int}}`
+
+	output, err := renderTemplate(templateString, notificationMessage)
+	assert.NoError(t, err)
+	assert.Equal(t, `Message: 42
+SyncDestinations: 3`, output)
+}
+
+func TestRenderTemplate_WithInvalidIntConversion(t *testing.T) {
+	notificationMessage := v1alpha1.NotificationMessage{
+		Message: "not-an-int",
+	}
+
+	output, err := renderTemplate(`Message: {{.Message | int}}`, notificationMessage)
+	assert.Error(t, err)
+	assert.Empty(t, output)
+}
