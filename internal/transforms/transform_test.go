@@ -78,6 +78,45 @@ func TestExecuteTransformTemplate(t *testing.T) {
 			expected: []byte(`{"encoded":"not base64!"}`),
 			wantErr:  true,
 		},
+		{
+			name: "Int template function converts JSON number",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{
+						Template: ptrToString(`{"newKey":{{ .key | int }}}`),
+					},
+				},
+			},
+			secret:   []byte(`{"key":42}`),
+			expected: []byte(`{"newKey":42}`),
+			wantErr:  false,
+		},
+		{
+			name: "Int template function converts numeric string",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{
+						Template: ptrToString(`{"newKey":{{ .key | int }}}`),
+					},
+				},
+			},
+			secret:   []byte(`{"key":"42.0"}`),
+			expected: []byte(`{"newKey":42}`),
+			wantErr:  false,
+		},
+		{
+			name: "Int template function rejects invalid string",
+			sc: v1alpha1.VaultSecretSync{
+				Spec: v1alpha1.VaultSecretSyncSpec{
+					Transforms: &v1alpha1.TransformSpec{
+						Template: ptrToString(`{"newKey":{{ .key | int }}}`),
+					},
+				},
+			},
+			secret:   []byte(`{"key":"not-an-int"}`),
+			expected: []byte(`{"key":"not-an-int"}`),
+			wantErr:  true,
+		},
 	}
 
 	for _, tt := range tests {

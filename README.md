@@ -227,7 +227,7 @@ Template functions are available for common conversions:
 
 - `json`: marshal a value to JSON
 - `string`: convert a value to a string
-- `int`: convert a value to an integer
+- `int`: convert an integer, JSON number, or numeric string to an integer
 - `base64encode`: encode a value using standard base64 encoding
 - `base64decode`: decode a standard base64 encoded value
 
