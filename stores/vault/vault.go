@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -336,7 +337,11 @@ func (vc *VaultClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 				"attempt": attempt,
 				"backoff": backoff,
 			}).Debug("retrying write after CAS conflict")
-			time.Sleep(backoff)
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("aborted write to %s after %d CAS conflicts: %w", s, attempt, ctx.Err())
+			case <-time.After(backoff):
+			}
 		}
 
 		// Get current version and data
@@ -361,10 +366,18 @@ func (vc *VaultClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 		// Attempt write with CAS
 		_, err = vc.WriteSecretOnce(ctx, s, dataToWrite, currentVersion)
 		if err != nil {
-			if isCASWriteError(err) {
+			if isCASRequiredError(err) {
+				// The mount requires CAS and we could not supply a version.
+				// Retrying cannot change that, so fail with something the
+				// operator can act on.
+				return nil, fmt.Errorf("mount requires check-and-set but no version could be determined for %s "+
+					"(the token needs read on the kv metadata path): %w", s, err)
+			}
+
+			if isCASConflictError(err) {
 				l.WithFields(log.Fields{
 					"attempt":      attempt,
-					"expected_cas": currentVersion,
+					"expected_cas": casForLog(currentVersion),
 				}).Warn("CAS conflict detected, retrying")
 
 				attempt++
@@ -385,19 +398,47 @@ func (vc *VaultClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 
 		l.WithFields(log.Fields{
 			"attempt": attempt,
-			"cas":     currentVersion,
+			"cas":     casForLog(currentVersion),
 		}).Debug("successfully wrote secret")
 		return nil, nil
 	}
 }
 
-func isCASWriteError(err error) bool {
+// isCASConflictError reports whether err is a transient check-and-set version
+// conflict. Another writer beat us to the secret, so re-reading the current
+// version and writing again can succeed.
+func isCASConflictError(err error) bool {
 	if err == nil {
 		return false
 	}
 	return strings.Contains(err.Error(), "check-and-set parameter did not match") ||
-		strings.Contains(err.Error(), "cas parameter did not match") ||
-		strings.Contains(err.Error(), "check-and-set parameter required")
+		strings.Contains(err.Error(), "cas parameter did not match")
+}
+
+// isCASRequiredError reports whether the KV mount requires check-and-set but
+// the write omitted it. This is permanent: an identical retry produces an
+// identical error, so it must not feed the conflict retry loop.
+func isCASRequiredError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "check-and-set parameter required")
+}
+
+// casForLog renders a CAS pointer for log fields; logging the pointer itself
+// prints an address, which is exactly the value you want when debugging this.
+func casForLog(cas *int) any {
+	if cas == nil {
+		return "none"
+	}
+	return *cas
+}
+
+// isNotFoundError reports whether err is a Vault 404. The KV v2 metadata path
+// 404s for a secret that has never been written, which is not a failure.
+func isNotFoundError(err error) bool {
+	var respErr *api.ResponseError
+	return errors.As(err, &respErr) && respErr.StatusCode == http.StatusNotFound
 }
 
 // WriteSecret writes a secret to Vault VaultClient at path p with secret value s
@@ -453,12 +494,20 @@ func (vc *VaultClient) getSecretWithVersion(ctx context.Context, s string) (*int
 	metadataPathStr := strings.Join(metadataPath, "/")
 
 	metadata, err := vc.Client.Logical().ReadWithContext(ctx, metadataPathStr)
+	if err != nil && !isNotFoundError(err) {
+		// A metadata read that fails for any reason other than "not found"
+		// tells us nothing about the current version. Defaulting to CAS 0 here
+		// would claim the secret does not exist, and every write against an
+		// existing secret would then conflict forever.
+		return nil, nil, fmt.Errorf("failed to read metadata %s: %w", metadataPathStr, err)
+	}
 
-	// CAS 0 creates the secret only if it does not already exist. Always return
-	// a CAS value so writes also work when CAS is required at the KV mount.
+	// CAS 0 creates the secret only if it does not already exist. Default to it
+	// so writes also work when CAS is required at the KV mount and the
+	// destination secret has never been written.
 	initialVersion := 0
 	currentVersion := &initialVersion
-	if err == nil && metadata != nil && metadata.Data != nil {
+	if metadata != nil && metadata.Data != nil {
 		if cv, ok := metadata.Data["current_version"]; ok {
 			switch v := cv.(type) {
 			case json.Number:
