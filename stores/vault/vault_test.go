@@ -2,15 +2,21 @@ package vault
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/vault/api"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // mockVaultLogical simulates Vault's logical backend for testing
@@ -211,6 +217,176 @@ func TestGetSecretWithVersion_Success(t *testing.T) {
 	data := secret["data"].(map[string]interface{})
 	assert.Equal(t, "value1", data["key1"])
 	assert.Equal(t, "value2", data["key2"])
+}
+
+func TestGetSecretWithVersion_NewSecretReturnsCASZero(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"errors":[]}`))
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(&api.Config{Address: server.URL})
+	require.NoError(t, err)
+
+	vc := &VaultClient{Client: client}
+	version, data, err := vc.getSecretWithVersion(context.Background(), "kv/test/secret")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "secret not found")
+	require.NotNil(t, version)
+	assert.Equal(t, 0, *version)
+	assert.Nil(t, data)
+}
+
+func TestWriteSecretOnceIncludesCASZero(t *testing.T) {
+	var payload map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/kv/data/test/secret", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(&api.Config{Address: server.URL})
+	require.NoError(t, err)
+
+	vc := &VaultClient{Client: client}
+	cas := 0
+	_, err = vc.WriteSecretOnce(context.Background(), "kv/test/secret", map[string]interface{}{"key": "value"}, &cas)
+	require.NoError(t, err)
+
+	options, ok := payload["options"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(0), options["cas"])
+}
+
+func TestIsCASConflictError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{name: "check-and-set mismatch", err: errors.New("check-and-set parameter did not match"), expected: true},
+		{name: "cas mismatch", err: errors.New("cas parameter did not match"), expected: true},
+		// A mount that requires CAS is a permanent condition, not a conflict.
+		// Retrying it would spin forever, so it is classified separately.
+		{name: "cas required", err: errors.New("check-and-set parameter required for this call"), expected: false},
+		{name: "unrelated", err: errors.New("permission denied"), expected: false},
+		{name: "nil", err: nil, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isCASConflictError(tt.err))
+		})
+	}
+}
+
+func TestIsCASRequiredError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{name: "cas required", err: errors.New("check-and-set parameter required for this call"), expected: true},
+		{name: "cas mismatch", err: errors.New("check-and-set parameter did not match"), expected: false},
+		{name: "unrelated", err: errors.New("permission denied"), expected: false},
+		{name: "nil", err: nil, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isCASRequiredError(tt.err))
+		})
+	}
+}
+
+// A metadata read that fails for a reason other than "not found" must not be
+// mistaken for a new secret. Defaulting to CAS 0 against an existing secret
+// makes every write conflict, and the conflict retry loop is unbounded.
+func TestGetSecretWithVersion_MetadataReadErrorDoesNotDefaultToCASZero(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/metadata/") {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"errors":["permission denied"]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"data":{"key":"existing"},"metadata":{"version":7}}}`))
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(&api.Config{Address: server.URL})
+	require.NoError(t, err)
+
+	vc := &VaultClient{Client: client}
+	version, data, err := vc.getSecretWithVersion(context.Background(), "kv/test/secret")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to read metadata")
+	assert.Nil(t, version)
+	assert.Nil(t, data)
+}
+
+// The 404 on the metadata path is the ordinary "never written" case and must
+// still yield CAS 0 so creation works on a cas_required mount.
+func TestGetSecretWithVersion_MetadataNotFoundStillReturnsCASZero(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"errors":["1 error occurred:\n\t* not found\n\n"]}`))
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(&api.Config{Address: server.URL})
+	require.NoError(t, err)
+
+	vc := &VaultClient{Client: client}
+	version, _, err := vc.getSecretWithVersion(context.Background(), "kv/test/secret")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "secret not found")
+	require.NotNil(t, version)
+	assert.Equal(t, 0, *version)
+}
+
+// A mount that requires CAS while no version is available must fail fast
+// rather than feed the unbounded conflict retry loop.
+func TestWriteSecret_CASRequiredFailsFast(t *testing.T) {
+	var writes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/metadata/"):
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"errors":[]}`))
+		case r.Method == http.MethodGet:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"errors":[]}`))
+		default:
+			writes.Add(1)
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"errors":["check-and-set parameter required for this call"]}`))
+		}
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(&api.Config{Address: server.URL})
+	require.NoError(t, err)
+	client.SetToken("test-token")
+
+	vc := &VaultClient{Client: client, AuthMethod: "token"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err = vc.WriteSecret(ctx, metav1.ObjectMeta{}, "kv/test/secret", []byte(`{"key":"value"}`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires check-and-set")
+	assert.Equal(t, int32(1), writes.Load(), "cas-required is permanent and must not be retried")
 }
 
 func TestCASRetry_EventualSuccess(t *testing.T) {
