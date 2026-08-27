@@ -2,6 +2,8 @@ package vault
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -211,6 +213,67 @@ func TestGetSecretWithVersion_Success(t *testing.T) {
 	data := secret["data"].(map[string]interface{})
 	assert.Equal(t, "value1", data["key1"])
 	assert.Equal(t, "value2", data["key2"])
+}
+
+func TestGetSecretWithVersion_NewSecretReturnsCASZero(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"errors":[]}`))
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(&api.Config{Address: server.URL})
+	require.NoError(t, err)
+
+	vc := &VaultClient{Client: client}
+	version, data, err := vc.getSecretWithVersion(context.Background(), "kv/test/secret")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "secret not found")
+	require.NotNil(t, version)
+	assert.Equal(t, 0, *version)
+	assert.Nil(t, data)
+}
+
+func TestWriteSecretOnceIncludesCASZero(t *testing.T) {
+	var payload map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/kv/data/test/secret", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(&api.Config{Address: server.URL})
+	require.NoError(t, err)
+
+	vc := &VaultClient{Client: client}
+	cas := 0
+	_, err = vc.WriteSecretOnce(context.Background(), "kv/test/secret", map[string]interface{}{"key": "value"}, &cas)
+	require.NoError(t, err)
+
+	options, ok := payload["options"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, float64(0), options["cas"])
+}
+
+func TestIsCASWriteError(t *testing.T) {
+	tests := []struct {
+		err      error
+		expected bool
+	}{
+		{err: errors.New("check-and-set parameter did not match"), expected: true},
+		{err: errors.New("cas parameter did not match"), expected: true},
+		{err: errors.New("check-and-set parameter required for this call"), expected: true},
+		{err: errors.New("permission denied"), expected: false},
+		{err: nil, expected: false},
+	}
+
+	for _, tt := range tests {
+		assert.Equal(t, tt.expected, isCASWriteError(tt.err))
+	}
 }
 
 func TestCASRetry_EventualSuccess(t *testing.T) {

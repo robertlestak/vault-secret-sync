@@ -361,8 +361,7 @@ func (vc *VaultClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 		// Attempt write with CAS
 		_, err = vc.WriteSecretOnce(ctx, s, dataToWrite, currentVersion)
 		if err != nil {
-			if strings.Contains(err.Error(), "check-and-set parameter did not match") ||
-				strings.Contains(err.Error(), "cas parameter did not match") {
+			if isCASWriteError(err) {
 				l.WithFields(log.Fields{
 					"attempt":      attempt,
 					"expected_cas": currentVersion,
@@ -390,6 +389,15 @@ func (vc *VaultClient) WriteSecret(ctx context.Context, meta metav1.ObjectMeta, 
 		}).Debug("successfully wrote secret")
 		return nil, nil
 	}
+}
+
+func isCASWriteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "check-and-set parameter did not match") ||
+		strings.Contains(err.Error(), "cas parameter did not match") ||
+		strings.Contains(err.Error(), "check-and-set parameter required")
 }
 
 // WriteSecret writes a secret to Vault VaultClient at path p with secret value s
@@ -446,7 +454,10 @@ func (vc *VaultClient) getSecretWithVersion(ctx context.Context, s string) (*int
 
 	metadata, err := vc.Client.Logical().ReadWithContext(ctx, metadataPathStr)
 
-	var currentVersion *int = nil
+	// CAS 0 creates the secret only if it does not already exist. Always return
+	// a CAS value so writes also work when CAS is required at the KV mount.
+	initialVersion := 0
+	currentVersion := &initialVersion
 	if err == nil && metadata != nil && metadata.Data != nil {
 		if cv, ok := metadata.Data["current_version"]; ok {
 			switch v := cv.(type) {
